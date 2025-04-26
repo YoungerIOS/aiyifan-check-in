@@ -11,11 +11,11 @@ import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
 
-EMAIL_HOST = "smtp.example.com"      # SMTP服务器地址
-EMAIL_PORT = 465                     # SMTP端口（SSL通常是465）
-EMAIL_USER = "your_email@example.com"  # 发件人邮箱
-EMAIL_PASS = "your_email_password"     # 邮箱授权码或密码
-EMAIL_TO = "your_email@example.com"    # 收件人邮箱
+EMAIL_HOST = os.getenv("EMAIL_HOST") # SMTP服务器地址
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465")) # SMTP端口（SSL通常是465）
+EMAIL_USER = os.getenv("EMAIL_USER") # 发件人邮箱
+EMAIL_PASS = os.getenv("EMAIL_PASS") # 邮箱授权码或密码
+EMAIL_TO   = os.getenv("EMAIL_TO")   # 收件人邮箱
 
 def check_login_status(page):
     """检查是否已登录"""
