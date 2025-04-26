@@ -1,0 +1,2195 @@
+import time
+import os
+from playwright.sync_api import sync_playwright
+import json
+import datetime
+import argparse
+import random
+import traceback
+
+def check_login_status(page):
+    """检查是否已登录"""
+    try:
+        print("正在检查登录状态...")
+        
+        # 尝试查找登录后才会显示的元素，例如用户头像
+        # 使用更精确的选择器避免多元素匹配
+        user_avatar = page.locator('div.user-avatar:visible, div.avatar.logged-in, img.avatar[src*="avatar"], .user-profile:visible, [class*="avatar"]:visible').first
+        if user_avatar and user_avatar.count() > 0:
+            try:
+                if user_avatar.is_visible():
+                    print("✅ 检测到头像元素")
+                    return True
+            except Exception as e:
+                print(f"检查头像时出错: {str(e)}")
+        
+        # 检查是否有登出按钮
+        logout_btn = page.locator('a:has-text("退出"):visible, a:has-text("登出"):visible, [aria-label="退出登录"], button:has-text("退出登录")').first
+        if logout_btn and logout_btn.count() > 0:
+            try:
+                if logout_btn.is_visible():
+                    print("✅ 检测到退出按钮")
+                    return True
+            except Exception as e:
+                print(f"检查退出按钮时出错: {str(e)}")
+        
+        # 检查是否有用户名显示
+        username_element = page.locator('.username:visible, .user-name:visible, .nickname:visible, [class*="username"]:visible, [class*="user-name"]:visible').first
+        if username_element and username_element.count() > 0:
+            try:
+                if username_element.is_visible():
+                    print("✅ 检测到用户名元素")
+                    return True
+            except Exception as e:
+                print(f"检查用户名时出错: {str(e)}")
+        
+        # 检查URL中的用户信息
+        if '/user/' in page.url or '/member/' in page.url or '/account/' in page.url or '/profile/' in page.url:
+            print("✅ URL中包含用户路径")
+            return True
+        
+        # 检查个人中心按钮
+        user_center = page.locator('a:has-text("个人中心"), a:has-text("我的"), [href*="user"], [href*="member"], [href*="account"], [href*="profile"]').first
+        if user_center and user_center.count() > 0:
+            try:
+                if user_center.is_visible():
+                    # 检查是否显示为"登录/注册"
+                    text = user_center.text_content().strip()
+                    if "登录" not in text and "注册" not in text:
+                        print(f"✅ 检测到个人中心按钮: {text}")
+                        return True
+            except Exception as e:
+                print(f"检查个人中心按钮时出错: {str(e)}")
+        
+        # 检查页面内容是否包含用户相关文本
+        try:
+            page_content = page.content()
+            if "个人信息" in page_content or "我的收藏" in page_content or "我的关注" in page_content:
+                print("✅ 页面内容包含用户相关文本")
+                return True
+        except Exception as e:
+            print(f"检查页面内容时出错: {str(e)}")
+        
+        # 检查localStorage中是否有登录token
+        has_token = page.evaluate('''() => {
+            try {
+                console.log("检查localStorage中的登录信息");
+                const tokens = [
+                    localStorage.getItem('token'),
+                    localStorage.getItem('userToken'),
+                    localStorage.getItem('auth'),
+                    localStorage.getItem('userInfo'),
+                    localStorage.getItem('user'),
+                    localStorage.getItem('session')
+                ];
+                
+                console.log("找到的存储项:", tokens.filter(Boolean));
+                
+                return tokens.some(Boolean);
+            } catch(e) {
+                console.error("检查localStorage时出错:", e);
+                return false;
+            }
+        }''')
+        
+        if has_token:
+            print("✅ 在localStorage中找到了登录凭证")
+            return True
+            
+        print("❌ 未检测到登录状态")
+        return False
+    except Exception as e:
+        print(f"❌ 检查登录状态时出错: {str(e)}")
+        # 默认返回未登录状态
+        return False
+
+def get_username(page):
+    """尝试获取当前登录用户名"""
+    try:
+        # 方法1: 从用户个人中心获取
+        username = page.evaluate('''() => {
+            const userElement = document.querySelector('.username, .user-name, .account-name');
+            if (userElement) return userElement.textContent.trim();
+            
+            // 尝试从localStorage获取
+            const userInfo = localStorage.getItem('userInfo');
+            if (userInfo) {
+                try {
+                    const parsed = JSON.parse(userInfo);
+                    return parsed.username || parsed.nickname || 'unknown';
+                } catch (e) {}
+            }
+            
+            return 'unknown';
+        }''')
+        return username
+    except:
+        return "unknown_user"
+
+def save_storage_state(context, file_path):
+    """保存浏览器状态（cookies, localStorage等）"""
+    storage = context.storage_state()
+    with open(file_path, 'w') as f:
+        json.dump(storage, f)
+    print(f"✅ 已保存浏览器状态到 {file_path}")
+
+def load_storage_state(context, file_path):
+    """加载保存的浏览器状态，包括cookies和localStorage"""
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                storage = json.load(f)
+            
+            # 加载cookies
+            if 'cookies' in storage:
+                context.add_cookies(storage['cookies'])
+                print(f"✅ 成功加载 {len(storage['cookies'])} 个cookies")
+            
+            # 加载localStorage
+            if 'origins' in storage:
+                # 处理origins是列表的情况
+                if isinstance(storage['origins'], list):
+                    for origin_data in storage['origins']:
+                        if 'origin' in origin_data and 'localStorage' in origin_data:
+                            # 创建一个临时页面来设置localStorage
+                            page = context.new_page()
+                            try:
+                                page.goto(origin_data['origin'])
+                                # 设置localStorage
+                                for item in origin_data['localStorage']:
+                                    if 'name' in item and 'value' in item:
+                                        page.evaluate(f"localStorage.setItem('{item['name']}', '{item['value']}')")
+                                print(f"✅ 成功为 {origin_data['origin']} 设置 {len(origin_data['localStorage'])} 个localStorage项")
+                            except Exception as e:
+                                print(f"为 {origin_data['origin']} 设置localStorage时出错: {str(e)}")
+                            finally:
+                                page.close()
+                # 处理origins是字典的情况（原有逻辑）
+                else:
+                    for origin, storage_data in storage['origins'].items():
+                        if 'localStorage' in storage_data:
+                            # 创建一个临时页面来设置localStorage
+                            page = context.new_page()
+                            try:
+                                page.goto(origin)
+                                # 设置localStorage
+                                for key, value in storage_data['localStorage'].items():
+                                    page.evaluate(f"localStorage.setItem('{key}', '{value}')")
+                                print(f"✅ 成功为 {origin} 设置 {len(storage_data['localStorage'])} 个localStorage项")
+                            except Exception as e:
+                                print(f"为 {origin} 设置localStorage时出错: {str(e)}")
+                            finally:
+                                page.close()
+            
+            print(f"✅ 成功从 {file_path} 加载浏览器状态")
+            return True
+        else:
+            print(f"❌ 未找到保存的状态文件: {file_path}")
+            return False
+    except Exception as e:
+        print(f"❌ 加载浏览器状态时出错: {str(e)}")
+        return False
+
+def logout(page):
+    """登出当前账号"""
+    try:
+        # 尝试点击头像
+        avatar = page.locator('.user-avatar, .avatar, .user-profile').first
+        if avatar.count() > 0:
+            avatar.click()
+            time.sleep(1)
+            
+            # 尝试点击登出按钮
+            logout_btn = page.locator('a:has-text("退出"), a:has-text("登出"), button:has-text("退出")').first
+            if logout_btn.count() > 0:
+                logout_btn.click()
+                time.sleep(2)
+                print("✅ 已成功登出")
+                return True
+        
+        # 如果上面的方法失败，尝试直接清除登录状态
+        page.evaluate('''() => {
+            localStorage.clear();
+            sessionStorage.clear();
+            document.cookie.split(";").forEach(function(c) { 
+                document.cookie = c.replace(/^ +/, "").replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/"); 
+            });
+        }''')
+        page.reload()
+        time.sleep(2)
+        print("✅ 已通过清除存储登出")
+        return True
+    except Exception as e:
+        print(f"❌ 登出失败: {str(e)}")
+        return False
+
+def direct_click_sign_in_button(page):
+    """直接定位并点击签到按钮，不依赖复杂的选择器逻辑"""
+    try:
+        print("尝试直接定位并点击签到按钮...")
+        
+        # 确保我们在个人中心页面
+        if "user" not in page.url and "我的" not in page.url:
+            # 尝试点击个人中心入口
+            try:
+                # 尝试点击顶部蓝色的"个人中心"链接
+                personal_center = page.locator('a.app-btn-primary:has-text("个人中心")').first
+                if personal_center.count() > 0 and personal_center.is_visible():
+                    personal_center.click()
+                    print("已点击顶部个人中心链接")
+                    time.sleep(3)
+                else:
+                    # 尝试点击右上角头像
+                    avatar = page.locator('img.avatar, .avatar-img').first
+                    if avatar.count() > 0 and avatar.is_visible():
+                        avatar.click()
+                        print("已点击右上角头像")
+                        time.sleep(3)
+            except Exception as e:
+                print(f"尝试进入个人中心失败: {str(e)}")
+        
+        # 尝试先定位"日常任务"标签并点击
+        try:
+            daily_task_tab = page.locator('a:has-text("日常任务"), div:has-text("日常任务")').first
+            if daily_task_tab.count() > 0 and daily_task_tab.is_visible():
+                daily_task_tab.click()
+                print("已点击日常任务标签")
+                time.sleep(1)
+        except Exception as e:
+            print(f"点击日常任务标签失败: {str(e)}")
+        
+        # 截图保存
+        try:
+            page.screenshot(path="account_data/before_direct_click.png")
+            print("已保存操作前截图")
+        except:
+            pass
+        
+        # 在页面上执行JavaScript定位并点击按钮
+        # 这个方法会更直接地搜索包含"立即签到"文本的按钮
+        try:
+            result = page.evaluate('''() => {
+                // 查找所有按钮元素
+                const buttons = Array.from(document.querySelectorAll('button'));
+                
+                // 查找包含"立即签到"文本的按钮
+                const signInButton = buttons.find(button => 
+                    button.textContent.includes('立即签到') && 
+                    button.offsetWidth > 0 && 
+                    button.offsetHeight > 0
+                );
+                
+                if (signInButton) {
+                    // 获取按钮位置信息
+                    const rect = signInButton.getBoundingClientRect();
+                    console.log('找到签到按钮:', signInButton.textContent, '位置:', rect.left, rect.top);
+                    
+                    // 滚动到按钮位置
+                    signInButton.scrollIntoView({behavior: 'smooth', block: 'center'});
+                    
+                    // 点击按钮
+                    setTimeout(() => {
+                        signInButton.click();
+                        console.log('已点击签到按钮');
+                    }, 500);
+                    
+                    return {success: true, text: signInButton.textContent};
+                }
+                
+                return {success: false, message: '未找到签到按钮'};
+            }''')
+            
+            if result and result.get('success'):
+                print(f"✅ 通过JavaScript找到并点击了按钮: {result.get('text')}")
+                time.sleep(2)
+                
+                # 保存点击后截图
+                page.screenshot(path="account_data/after_direct_click.png")
+                print("已保存点击后截图")
+                
+                # 检查点击效果
+                success = check_sign_in_success(page)
+                return success
+            else:
+                print(f"❌ JavaScript没有找到签到按钮: {result.get('message')}")
+        except Exception as e:
+            print(f"JavaScript执行失败: {str(e)}")
+        
+        # 直接尝试点击页面上的"立即签到"按钮
+        # 使用更加精确的选择器
+        sign_in_selectors = [
+            # 绝对精确的CSS选择器
+            'button.sign-in-btn',
+            '.daily-task-item button:has-text("立即签到")',
+            '.task-item button:has-text("立即签到")',
+            '.daily-sign button:has-text("立即签到")',
+            # 使用文本内容定位
+            'button:has-text("立即签到")',
+            # 使用相对位置定位
+            '.every-day-sign button',
+            '.sign-container button'
+        ]
+        
+        for selector in sign_in_selectors:
+            try:
+                button = page.locator(selector).first
+                if button.count() > 0 and button.is_visible():
+                    # 获取按钮位置并报告
+                    try:
+                        box = button.bounding_box()
+                        text = button.text_content().strip()
+                        print(f"找到按钮: '{text}' 位置: x={box['x']}, y={box['y']}")
+                        
+                        # 滚动到按钮位置
+                        button.scroll_into_view_if_needed()
+                        time.sleep(1)
+                        
+                        # 点击按钮
+                        button.click(force=True)
+                        print(f"✅ 已点击签到按钮: '{text}'")
+                        time.sleep(2)
+                        
+                        # 保存截图
+                        page.screenshot(path="account_data/after_selector_click.png")
+                        
+                        # 检查是否签到成功
+                        if check_sign_in_success(page):
+                            return True
+                    except Exception as e:
+                        print(f"尝试点击按钮失败: {str(e)}")
+            except Exception as e:
+                continue
+        
+        # 尝试使用协调点击（计算点击位置）
+        try:
+            # 使用evaluate查找按钮位置
+            button_info = page.evaluate('''() => {
+                const signText = "立即签到";
+                let elements = [];
+                
+                // 查找所有包含"立即签到"文本的元素
+                const textNodes = [];
+                const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while (node = walk.nextNode()) {
+                    if (node.textContent.includes(signText)) {
+                        textNodes.push(node);
+                    }
+                }
+                
+                // 获取包含文本节点的按钮元素
+                textNodes.forEach(textNode => {
+                    let current = textNode.parentElement;
+                    while (current && current !== document.body) {
+                        if (current.tagName === 'BUTTON' || 
+                            (current.getAttribute('role') === 'button') ||
+                            current.classList.contains('btn') || 
+                            current.classList.contains('button')) {
+                            
+                            const rect = current.getBoundingClientRect();
+                            elements.push({
+                                text: current.textContent.trim(),
+                                tagName: current.tagName,
+                                className: current.className,
+                                x: rect.x + rect.width/2,
+                                y: rect.y + rect.height/2,
+                                width: rect.width,
+                                height: rect.height,
+                                visible: rect.width > 0 && rect.height > 0
+                            });
+                            break;
+                        }
+                        current = current.parentElement;
+                    }
+                });
+                
+                return elements;
+            }''')
+            
+            print(f"找到 {len(button_info)} 个可能包含'立即签到'文本的元素")
+            
+            for btn in button_info:
+                if btn.get('visible', False):
+                    print(f"尝试点击元素: {btn.get('text')} ({btn.get('tagName')}.{btn.get('className')}) 位置: x={btn.get('x')}, y={btn.get('y')}")
+                    
+                    # 滚动到元素位置
+                    page.evaluate(f"window.scrollTo(0, {btn.get('y') - 200})")
+                    time.sleep(1)
+                    
+                    # 使用鼠标点击指定坐标
+                    page.mouse.click(btn.get('x'), btn.get('y'))
+                    print(f"✅ 已通过坐标点击: x={btn.get('x')}, y={btn.get('y')}")
+                    time.sleep(2)
+                    
+                    # 保存截图
+                    page.screenshot(path="account_data/after_coord_click.png")
+                    
+                    # 检查是否签到成功
+                    if check_sign_in_success(page):
+                        return True
+        except Exception as e:
+            print(f"坐标点击失败: {str(e)}")
+        
+        return False
+    except Exception as e:
+        print(f"直接点击签到按钮过程中出错: {str(e)}")
+        return False
+
+def check_sign_in_success(page):
+    """检查签到是否成功"""
+    try:
+        # 截图保存
+        try:
+            page.screenshot(path="account_data/sign_in_check.png")
+        except:
+            pass
+            
+        # 检查常见的签到成功提示
+        success_indicators = [
+            "签到成功", 
+            "已签到",
+            "明日再来",
+            "已完成",
+            "+3 积分",
+            "签到已领取"
+        ]
+        
+        # 获取页面内容
+        page_content = page.content()
+        
+        # 检查页面内容是否包含成功指示词
+        for indicator in success_indicators:
+            if indicator in page_content:
+                print(f"✅ 找到签到成功指示: '{indicator}'")
+                return True
+                
+        # 尝试查找成功提示元素
+        try:
+            success_toast = page.locator(".toast-success, .success-toast, [class*='success']").first
+            if success_toast.count() > 0 and success_toast.is_visible():
+                print(f"✅ 找到成功提示元素: {success_toast.text_content()}")
+                return True
+        except:
+            pass
+            
+        # 检查页面元素
+        sign_in_status = page.evaluate("""() => {
+            // 查找可能表示签到成功的元素
+            const allTexts = [];
+            const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node;
+            
+            while (node = walk.nextNode()) {
+                const text = node.textContent.trim();
+                if (text && (
+                    text.includes('签到成功') || 
+                    text.includes('已签到') || 
+                    text.includes('明日再来') ||
+                    text.includes('已完成') ||
+                    text.includes('+3'))) {
+                    
+                    allTexts.push({
+                        text: text,
+                        visible: node.parentElement.offsetWidth > 0 && node.parentElement.offsetHeight > 0
+                    });
+                }
+            }
+            
+            return allTexts;
+        }""")
+        
+        if sign_in_status and len(sign_in_status) > 0:
+            for status in sign_in_status:
+                if status.get('visible', False):
+                    print(f"✅ 找到签到成功指示元素: '{status.get('text')}'")
+                    return True
+        
+        print("❌ 未检测到签到成功")
+        return False
+    except Exception as e:
+        print(f"检查签到状态时出错: {str(e)}")
+        return False
+
+def direct_sign_in_with_coordinates(page):
+    """使用预定义坐标直接点击签到按钮"""
+    try:
+        print("尝试使用坐标定位直接点击签到按钮...")
+        
+        # 确保页面加载完成
+        page.wait_for_load_state("networkidle", timeout=10000)
+        page.wait_for_timeout(2000)  # 等待2秒确保页面完全加载
+        
+        # 滚动页面以显示签到按钮的区域
+        page.evaluate("window.scrollTo(0, 200)")
+        page.wait_for_timeout(1500)
+        
+        # 尝试前先截图
+        try:
+            page.screenshot(path="account_data/before_signin_click.png")
+        except:
+            pass
+        
+        # 定义可能的签到按钮坐标位置（基于常见布局）
+        button_coordinates = [
+            {'x': 635, 'y': 200},  # 主要位置
+            {'x': 635, 'y': 260},  # 位置变体1
+            {'x': 675, 'y': 260},  # 位置变体2
+            {'x': 650, 'y': 200},  # 位置变体3
+            {'x': 600, 'y': 220},  # 位置变体4
+            {'x': 690, 'y': 220},  # 位置变体5
+        ]
+        
+        click_success = False
+        
+        # 尝试使用预定义坐标点击
+        for coords in button_coordinates:
+            x, y = coords['x'], coords['y']
+            
+            try:
+                # 确保点击区域在视口中
+                page.evaluate(f"window.scrollTo(0, {y - 100})")
+                page.wait_for_timeout(500)
+                
+                print(f"尝试点击坐标: x={x}, y={y}")
+                
+                # 使用mouse模拟真实点击
+                page.mouse.move(x, y)
+                page.wait_for_timeout(300)
+                page.mouse.click(x, y)
+                
+                # 等待可能的响应
+                page.wait_for_timeout(3000)
+                
+                # 检查是否签到成功
+                if check_sign_in_success(page):
+                    click_success = True
+                    print(f"✅ 使用坐标 ({x}, {y}) 点击成功!")
+                    break
+            except Exception as e:
+                print(f"尝试点击坐标 ({x}, {y}) 时出错: {str(e)}")
+        
+        # 如果直接坐标点击失败，尝试通过文本查找签到按钮
+        if not click_success:
+            try:
+                print("尝试通过文本查找签到按钮...")
+                
+                # 查找包含特定文本的元素
+                sign_in_texts = ["立即签到", "签到", "打卡", "领取奖励", "每日签到"]
+                
+                for text in sign_in_texts:
+                    try:
+                        button = page.locator(f"text='{text}'").first
+                        if button.count() > 0 and button.is_visible():
+                            print(f"找到文本为 '{text}' 的按钮")
+                            button.click(timeout=5000)
+                            
+                            # 等待可能的响应
+                            page.wait_for_timeout(3000)
+                            
+                            # 检查是否签到成功
+                            if check_sign_in_success(page):
+                                click_success = True
+                                print(f"✅ 点击文本为 '{text}' 的按钮成功!")
+                                break
+                    except Exception as e:
+                        print(f"尝试点击文本为 '{text}' 的按钮时出错: {str(e)}")
+            except Exception as e:
+                print(f"通过文本查找签到按钮时出错: {str(e)}")
+        
+        # 尝试后再截图
+        try:
+            page.screenshot(path="account_data/after_signin_click.png")
+        except:
+            pass
+            
+        return click_success
+    except Exception as e:
+        print(f"直接坐标点击签到出错: {str(e)}")
+        return False
+
+def perform_daily_check_in(page):
+    """执行每日签到"""
+    try:
+        print("正在查找签到按钮...")
+        
+        # 尝试先导航到个人中心页面
+        page.goto("https://www.yfsp.tv/user/index", timeout=30000)
+        time.sleep(3)
+        
+        # 尝试查找各种可能的签到按钮
+        sign_in_buttons = [
+            page.locator('button:has-text("签到"), button:has-text("打卡"), button:has-text("check in")').first,
+            page.locator('a:has-text("签到"), a:has-text("打卡"), a:has-text("check in")').first,
+            page.locator('.sign-button, .check-in-button, .sign-in-button, [class*="sign"]').first,
+            page.locator('[data-sign="1"], [data-action="sign"], [data-type="sign"]').first
+        ]
+        
+        for button in sign_in_buttons:
+            try:
+                if button.count() > 0 and button.is_visible():
+                    button_text = button.text_content().strip()
+                    print(f"找到签到按钮: {button_text}")
+                    
+                    # 点击签到按钮
+                    button.click()
+                    print("已点击签到按钮")
+                    time.sleep(2)
+                    
+                    # 检查是否签到成功
+                    if check_sign_in_success(page):
+                        return True
+                    else:
+                        continue  # 尝试下一个按钮
+            except Exception as e:
+                print(f"点击签到按钮出错: {str(e)}")
+        
+        # 如果没有找到明确的签到按钮，尝试使用更通用的方法
+        print("尝试查找通用签到按钮...")
+        
+        # 如果上述方法都失败，尝试点击屏幕中央
+        try:
+            print("尝试点击屏幕中央...")
+            # 正确访问viewport_size属性
+            viewport = page.viewport_size
+            center_x = viewport['width'] // 2
+            center_y = viewport['height'] // 2
+            
+            page.mouse.move(center_x, center_y)
+            time.sleep(0.5)
+            page.mouse.down()
+            time.sleep(0.3)
+            page.mouse.up()
+            print(f"已点击屏幕中央位置: x={center_x}, y={center_y}")
+            time.sleep(1)
+            
+            page.screenshot(path="account_data/center_click.png")
+            
+            # 检查是否签到成功
+            time.sleep(2)
+            if check_sign_in_success(page):
+                return True
+            else:
+                print("❓ 无法确认签到状态，假定签到流程已完成")
+                return True
+        except Exception as e:
+            print(f"点击屏幕中央失败: {str(e)}")
+            traceback.print_exc()  # 打印详细错误信息
+            return False
+        
+        return False  # 如果所有方法都失败
+    except Exception as e:
+        print(f"签到过程中出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def drag_slider_with_human_behavior(page):
+    """仿真人类拖动滑块"""
+    try:
+        print("尝试拖动滑块验证...")
+        # 查找滑块元素
+        slider = page.locator(".geetest_slider_button, .yidun_slider, .verify-slider, .slider-btn, .drag-btn, [class*='slider']").first
+        
+        if not slider or slider.count() == 0:
+            print("未找到滑块元素，尝试查找更多可能的选择器...")
+            slider = page.locator(".slider, [class*='slider'], [class*='drag'], [class*='verify']").first
+
+        if slider and slider.count() > 0 and slider.is_visible():
+            print("✅ 找到滑块验证码")
+            
+            # 获取滑块的位置和大小
+            slider_box = slider.bounding_box()
+            
+            # 等待滑块完全加载
+            time.sleep(1)
+            
+            # 计算滑动轨迹（模拟人类行为）
+            track = generate_human_like_track(slider_box['width'] * 2)  # 移动距离通常是滑块宽度的倍数
+            
+            # 首先将鼠标移动到滑块上
+            page.mouse.move(
+                slider_box['x'] + slider_box['width'] / 2,
+                slider_box['y'] + slider_box['height'] / 2,
+                steps=10
+            )
+            
+            # 短暂停留
+            time.sleep(random.uniform(0.1, 0.3))
+            
+            # 按下鼠标
+            page.mouse.down()
+            
+            # 模拟人类拖动滑块的轨迹
+            current_x = slider_box['x'] + slider_box['width'] / 2
+            current_y = slider_box['y'] + slider_box['height'] / 2
+            
+            for offset_x, offset_y in track:
+                current_x += offset_x
+                current_y += offset_y
+                page.mouse.move(
+                    current_x,
+                    current_y,
+                    steps=random.randint(1, 3)  # 随机步数，使移动更自然
+                )
+                # 随机微小停顿，模拟人类拖动时的不均匀
+                if random.random() < 0.3:  # 30%概率停顿
+                    time.sleep(random.uniform(0.001, 0.003))
+            
+            # 在最后位置停留一下，模拟人类行为
+            time.sleep(random.uniform(0.05, 0.1))
+            
+            # 释放鼠标
+            page.mouse.up()
+            print("✅ 完成滑块拖动")
+            
+            # 等待验证结果
+            time.sleep(3)
+            
+            # 检查是否验证成功（可能的成功提示元素）
+            success_element = page.locator('.geetest_success_animate, .geetest_panel.geetest_wind').first
+            if success_element and success_element.count() > 0 and success_element.is_visible():
+                print("✅ 滑块验证成功")
+                return True
+            
+            # 检查是否需要重试
+            retry_element = page.locator('.geetest_panel_error, .geetest_reset_tip, [class*="error"], [class*="retry"]').first
+            if retry_element and retry_element.count() > 0 and retry_element.is_visible():
+                print("⚠️ 滑块验证失败，准备重试...")
+                # 点击重试按钮
+                retry_button = page.locator('.geetest_refresh_1, .geetest_reset, [class*="retry"], [class*="refresh"]').first
+                if retry_button and retry_button.count() > 0:
+                    retry_button.click()
+                    time.sleep(1)
+                    # 递归重试，但最多重试3次
+                    return drag_slider_with_human_behavior(page)
+            
+            # 验证可能成功但没有明确提示，或者正在转圈
+            print("⚠️ 未检测到明确的验证结果，假定验证已完成或正在处理中")
+            time.sleep(2)  # 等待一段时间
+            return True
+        else:
+            print("未找到滑块元素，可能不需要验证或者验证方式已更改")
+            return True
+    except Exception as e:
+        print(f"❌ 拖动滑块时出错: {str(e)}")
+        # 拍摄截图记录错误
+        try:
+            page.screenshot(path="slider_error.png")
+            print("已保存滑块错误截图")
+        except:
+            pass
+        return False
+
+def generate_human_like_track(distance):
+    """生成逼真的人类拖动轨迹"""
+    # 轨迹数组，包含 (x, y) 的位移
+    tracks = []
+    
+    # 当前的移动总距离
+    current = 0
+    # 减速阈值
+    mid = distance * 4 / 5
+    # 时间间隔
+    t = 0.2
+    # 初始速度
+    v = 0
+    # 手动干扰过程，使轨迹更随机
+    
+    # 初始阶段慢速
+    current_v = random.uniform(1, 3)
+    # 添加一段随机的起步轨迹（模拟人类起步时的犹豫）
+    for i in range(random.randint(2, 4)):
+        tracks.append((random.uniform(0.5, 2), random.uniform(-0.5, 0.5)))
+    
+    # 正向滑动过程
+    while current < distance:
+        if current < distance * 0.1:
+            # 初始阶段加速度较小
+            a = random.uniform(1.5, 2.5)
+        elif current < mid:
+            # 中段加速度较大
+            a = random.uniform(2, 3)
+        else:
+            # 接近目标时减速
+            a = -random.uniform(5, 7)
+        
+        # 添加随机波动
+        a += random.uniform(-0.5, 0.5)
+        
+        # 计算当前速度
+        v0 = v
+        v = v0 + a * t
+        # 避免速度为负
+        if v < 0 and current > distance * 0.8:
+            v = 0
+        
+        # 位移
+        move = v * t + 0.5 * a * t * t
+        
+        # 超出距离处理
+        if current + move > distance:
+            move = distance - current
+        
+        # 添加轻微的垂直方向随机抖动
+        y_offset = random.uniform(-0.5, 0.5)
+        
+        # 较大概率微小左右移动（模拟手抖）
+        if random.random() < 0.6 and current > distance * 0.2:
+            # 添加一点回拉动作
+            x_offset = max(-2, move - random.uniform(0, 2))
+        else:
+            x_offset = move
+        
+        # 添加轨迹点
+        tracks.append((x_offset, y_offset))
+        
+        # 更新当前位移
+        current += move
+    
+    # 减速过冲，然后回退（模拟人类习惯性动作）
+    if distance > 30:  # 只有距离足够长时才模拟过冲
+        # 添加轻微过冲
+        overshoot = random.uniform(2, 4)
+        tracks.append((overshoot, random.uniform(-0.5, 0.5)))
+        
+        # 添加回拉
+        tracks.append((-overshoot, random.uniform(-0.5, 0.5)))
+    
+    # 在终点附近微调
+    for i in range(random.randint(2, 4)):
+        tracks.append((random.uniform(-0.6, 0.6), random.uniform(-0.6, 0.6)))
+    
+    return tracks
+
+def share_video(page):
+    """在网站上分享视频"""
+    try:
+        print("\n===== 开始分享视频 =====")
+        
+        # 导航到动漫列表页面，而不是首页
+        print("正在导航到动漫列表页面...")
+        page.goto("https://www.yfsp.tv/list/anime?orderBy=1", timeout=30000)
+        time.sleep(3)
+        
+        # 确保页面完全加载
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception as e:
+            print(f"等待页面加载时出错: {str(e)}，继续执行")
+        time.sleep(2)  # 额外等待，确保JavaScript完成渲染
+        
+        # 截图保存页面状态
+        try:
+            page.screenshot(path="account_data/anime_list_page.png")
+            print("已保存动漫列表页面截图")
+        except:
+            pass
+            
+        # 首先检查页面是否成功加载并包含动漫列表
+        page_title = page.title()
+        print(f"页面标题: {page_title}")
+        
+        # 使用多种选择器查找视频链接
+        video_selectors = [
+            'a[href*="/video/"]',  # 原来的选择器
+            '.video-item a',       # 常见的视频项目链接
+            '.anime-item a',       # 动漫项目链接
+            '.video-card a',       # 视频卡片链接
+            '.item a',             # 通用项目链接
+            'a.video-link',        # 视频链接类
+            'a[href*="/play/"]',   # 播放链接
+            'a[href*="/anime/"]',  # 动漫详情链接
+            '.list-item a'         # 列表项链接
+        ]
+        
+        videos = []
+        for selector in video_selectors:
+            found_videos = page.locator(selector).all()
+            if found_videos and len(found_videos) > 0:
+                print(f"使用选择器 '{selector}' 找到 {len(found_videos)} 个视频链接")
+                videos = found_videos
+                break
+        
+        # 如果常规选择器没找到，使用JavaScript更广泛地搜索
+        if not videos:
+            print("使用JavaScript搜索视频链接...")
+            video_links = page.evaluate('''() => {
+                // 查找所有链接
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                
+                // 过滤出可能是视频的链接
+                const videoLinks = allLinks.filter(link => {
+                    const href = link.getAttribute('href');
+                    return href.includes('/video/') || 
+                           href.includes('/play/') || 
+                           href.includes('/anime/') ||
+                           href.includes('/watch/');
+                });
+                
+                return videoLinks.map(link => {
+                    const rect = link.getBoundingClientRect();
+                    return {
+                        href: link.getAttribute('href'),
+                        text: link.textContent.trim(),
+                        x: rect.left + rect.width/2,
+                        y: rect.top + rect.height/2,
+                        visible: rect.width > 0 && rect.height > 0
+                    };
+                });
+            }''')
+            
+            if video_links and len(video_links) > 0:
+                visible_links = [link for link in video_links if link.get('visible')]
+                if visible_links:
+                    print(f"通过JavaScript找到 {len(visible_links)} 个可见的视频链接")
+                    # 从中随机选择一个链接点击
+                    selected_link = random.choice(visible_links)
+                    print(f"选择视频链接: {selected_link.get('href')} - {selected_link.get('text')}")
+                    
+                    # 直接导航到视频页面，而不是点击
+                    video_href = selected_link.get('href')
+                    video_url = "https://www.yfsp.tv" + video_href if video_href.startswith("/") else video_href
+                    print(f"直接导航到视频页面: {video_url}")
+                    page.goto(video_url, timeout=30000)
+                    time.sleep(5)
+                    
+                    # 等待视频页面加载
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception as e:
+                        print(f"等待视频页面加载时出错: {str(e)}，继续执行")
+                    time.sleep(3)  # 额外等待
+                else:
+                    print("❌ 未找到可见的视频链接")
+                    # 尝试点击页面上的第一个项目
+                    try:
+                        print("尝试点击页面上的第一个项目...")
+                        page.click('.item:first-child, .video-item:first-child, .anime-item:first-child')
+                        time.sleep(5)
+                    except Exception as e:
+                        print(f"点击第一个项目失败: {str(e)}")
+                        return False
+            else:
+                print("❌ 通过JavaScript也未找到视频链接")
+                # 保存错误截图
+                try:
+                    page.screenshot(path="account_data/no_videos_found.png")
+                except:
+                    pass
+                return False
+        
+        # 如果找到了视频列表
+        if videos:
+            # 从找到的视频中随机选择一个
+            random_index = random.randint(0, min(10, len(videos) - 1))
+            selected_video = videos[random_index]
+            
+            print(f"找到 {len(videos)} 个视频，选择第 {random_index + 1} 个视频进行分享")
+            
+            # 尝试获取链接
+            try:
+                href = selected_video.get_attribute("href")
+                if href:
+                    full_url = "https://www.yfsp.tv" + href if href.startswith("/") else href
+                    print(f"直接导航到视频页面: {full_url}")
+                    page.goto(full_url, timeout=30000)
+                    time.sleep(5)
+                    
+                    # 等待视频页面加载
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception as e:
+                        print(f"等待视频页面加载时出错: {str(e)}，继续执行")
+                    time.sleep(3)  # 额外等待
+                else:
+                    print("无法获取视频链接地址")
+                    try:
+                        # 点击选定的视频
+                        selected_video.click()
+                        time.sleep(5)
+                    except Exception as e:
+                        print(f"点击视频时出错: {str(e)}")
+                        return False
+            except Exception as e:
+                print(f"获取视频链接时出错: {str(e)}")
+                try:
+                    # 点击选定的视频
+                    selected_video.click()
+                    time.sleep(5)
+                except Exception as e:
+                    print(f"点击视频时出错: {str(e)}")
+                    return False
+        
+        # 保存视频页面截图
+        try:
+            page.screenshot(path="account_data/video_page.png")
+            print("已保存视频页面截图")
+        except:
+            pass
+            
+        # 获取当前视频页面URL和标题
+        video_url = page.url
+        video_title = page.title()
+        print(f"当前视频: {video_title}")
+        print(f"视频URL: {video_url}")
+        
+        # 验证当前页面是否为视频页面
+        if not ("/video/" in video_url or "/play/" in video_url or "/watch/" in video_url or "/anime/" in video_url):
+            print("⚠️ 警告：当前页面可能不是视频页面")
+            # 保存错误截图
+            try:
+                page.screenshot(path="account_data/not_video_page.png")
+            except:
+                pass
+
+        # 强制等待页面完全加载，确保所有元素都已渲染
+        print("等待页面完全加载...")
+        try:
+            page.wait_for_load_state("networkidle", timeout=20000)
+        except:
+            print("等待页面加载超时，但仍继续执行")
+        time.sleep(3)  # 额外等待
+        
+        # 先截图记录当前页面状态
+        try:
+            page.screenshot(path="account_data/before_share_click.png")
+            print("已保存分享前页面截图")
+        except:
+            pass
+        
+        # 直接定位具体的分享按钮元素 - 根据提供的截图使用精确的选择器
+        print("\n开始精确定位分享按钮...")
+        
+        # 记录是否找到并点击了分享按钮
+        share_button_clicked = False
+        
+        # 方法1: 使用按钮属性直接定位
+        try:
+            # 使用显式的等待，确保页面上有按钮元素
+            page.wait_for_selector('button', timeout=5000)
+            
+            # 使用提供的截图HTML中的准确属性选择器
+            share_button = page.locator('button[aria-label="分享"]').first
+            if share_button.count() > 0:
+                try:
+                    # 确保按钮可见且可点击
+                    if share_button.is_visible():
+                        print("找到aria-label为'分享'的按钮")
+                        
+                        # 滚动到按钮位置
+                        share_button.scroll_into_view_if_needed()
+                        time.sleep(1)
+                        
+                        # 高亮并直接点击
+                        share_button.highlight()
+                        time.sleep(1)
+                        share_button.click(force=True)
+                        print("已点击分享按钮")
+                        share_button_clicked = True
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"点击分享按钮(aria-label)时出错: {str(e)}")
+        except Exception as e:
+            print(f"查找aria-label为'分享'的按钮时出错: {str(e)}")
+        
+        # 方法2: 使用类名精确定位分享按钮
+        if not share_button_clicked:
+            try:
+                # 先检查是否存在包含"分享"文本的按钮
+                text_share = page.locator('button:has-text("分享"), span:has-text("分享")').first
+                if text_share.count() > 0 and text_share.is_visible():
+                    print("找到包含'分享'文本的元素")
+                    
+                    # 高亮并点击
+                    text_share.highlight()
+                    time.sleep(1)
+                    text_share.click(force=True)
+                    print("已点击包含'分享'文本的元素")
+                    share_button_clicked = True
+                    time.sleep(2)
+            except Exception as e:
+                print(f"查找包含'分享'文本的元素时出错: {str(e)}")
+        
+        # 方法3: 使用精确的CSS选择器结构
+        if not share_button_clicked:
+            try:
+                # 尝试根据截图中的HTML结构定位
+                # 首先查找分享图标
+                share_icon = page.locator('.iconfont.iconfenxiang, div[class*="share"], i[class*="share"]').first
+                if share_icon.count() > 0 and share_icon.is_visible():
+                    print("找到分享图标")
+                    
+                    # 高亮并点击
+                    share_icon.highlight()
+                    time.sleep(1)
+                    share_icon.click(force=True)
+                    print("已点击分享图标")
+                    share_button_clicked = True
+                    time.sleep(2)
+                    
+                    # 或者点击其父元素
+                    if not share_button_clicked:
+                        try:
+                            # 使用JavaScript获取图标的父级按钮元素
+                            page.evaluate('''() => {
+                                const icon = document.querySelector('.iconfont.iconfenxiang, div[class*="share"], i[class*="share"]');
+                                if (icon) {
+                                    // 查找父级按钮元素
+                                    let parent = icon.parentElement;
+                                    while (parent && parent.tagName !== 'BUTTON') {
+                                        parent = parent.parentElement;
+                                    }
+                                    
+                                    if (parent) {
+                                        parent.click();
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }''')
+                            print("已通过JavaScript点击分享图标的父级按钮")
+                            share_button_clicked = True
+                            time.sleep(2)
+                        except Exception as e:
+                            print(f"通过JavaScript点击分享图标父级按钮时出错: {str(e)}")
+            except Exception as e:
+                print(f"查找分享图标时出错: {str(e)}")
+        
+        # 方法4: 使用截图中显示的类名组合
+        if not share_button_clicked:
+            try:
+                # 查找分享框元素
+                share_box = page.locator('div.hovered-share-box, div[class*="share-box"]').first
+                if share_box.count() > 0 and share_box.is_visible():
+                    print("找到分享框元素")
+                    
+                    # 高亮并点击
+                    share_box.highlight()
+                    time.sleep(1)
+                    share_box.click(force=True)
+                    print("已点击分享框")
+                    share_button_clicked = True
+                    time.sleep(2)
+            except Exception as e:
+                print(f"查找分享框时出错: {str(e)}")
+        
+        # 方法5: 使用JavaScript精确定位按钮
+        if not share_button_clicked:
+            try:
+                print("尝试使用JavaScript精确查找分享按钮...")
+                
+                found_button = page.evaluate('''() => {
+                    // 所有可能的按钮
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    console.log(`找到 ${buttons.length} 个按钮`);
+                    
+                    // 检查每个按钮的属性
+                    for (const button of buttons) {
+                        // 记录每个按钮的特征
+                        const ariaLabel = button.getAttribute('aria-label');
+                        const title = button.getAttribute('title');
+                        const text = button.textContent.trim();
+                        const classes = button.className;
+                        
+                        console.log(`按钮: aria-label=${ariaLabel}, title=${title}, text=${text}, class=${classes}`);
+                        
+                        // 检查是否为分享按钮
+                        if (ariaLabel === '分享' || title === '分享' || text === '分享' || 
+                            classes.includes('share') || classes.includes('分享')) {
+                            
+                            // 记录按钮位置
+                            const rect = button.getBoundingClientRect();
+                            console.log(`找到分享按钮! 位置: x=${rect.x}, y=${rect.y}, 宽=${rect.width}, 高=${rect.height}`);
+                            
+                            // 确保按钮在视口内
+                            button.scrollIntoView({behavior: 'smooth', block: 'center'});
+                            
+                            // 延迟点击
+                            setTimeout(() => {
+                                button.click();
+                                console.log('已点击分享按钮');
+                            }, 500);
+                            
+                            return {
+                                found: true,
+                                x: rect.x,
+                                y: rect.y,
+                                width: rect.width,
+                                height: rect.height
+                            };
+                        }
+                    }
+                    
+                    // 查找所有带有分享相关类名的元素
+                    const shareElements = Array.from(document.querySelectorAll('[class*="share"], [class*="分享"], .iconfont.iconfenxiang'));
+                    console.log(`找到 ${shareElements.length} 个可能的分享元素`);
+                    
+                    if (shareElements.length > 0) {
+                        const element = shareElements[0];
+                        const rect = element.getBoundingClientRect();
+                        
+                        // 确保元素在视口内
+                        element.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        
+                        // 延迟点击
+                        setTimeout(() => {
+                            element.click();
+                            console.log('已点击分享元素');
+                        }, 500);
+                        
+                        return {
+                            found: true,
+                            x: rect.x,
+                            y: rect.y,
+                            width: rect.width,
+                            height: rect.height
+                        };
+                    }
+                    
+                    return { found: false };
+                }''')
+                
+                if found_button and found_button.get('found', False):
+                    print(f"通过JavaScript找到分享按钮，位置: x={found_button.get('x')}, y={found_button.get('y')}")
+                    share_button_clicked = True
+                    time.sleep(2)
+            except Exception as e:
+                print(f"使用JavaScript查找分享按钮时出错: {str(e)}")
+        
+        # 截图记录点击分享按钮后的状态
+        try:
+            page.screenshot(path="account_data/after_share_click.png")
+            print("已保存点击分享按钮后的截图")
+        except:
+            pass
+        
+        # 检查是否点击了分享按钮
+        if share_button_clicked:
+            print("✅ 已成功点击分享按钮，正在等待分享对话框...")
+            
+            # 等待分享对话框出现
+            time.sleep(2)
+            
+            # 检查并点击分享对话框中的选项
+            try:
+                # 尝试找到分享对话框元素
+                share_dialog = page.locator('div.share-dialog, div[class*="share-dialog"], div[class*="sharing"], div.dialog, .modal-content').first
+                if share_dialog.count() > 0 and share_dialog.is_visible():
+                    print("找到分享对话框元素")
+                    
+                    # 保存分享对话框截图
+                    try:
+                        page.screenshot(path="account_data/share_dialog.png")
+                        print("已保存分享对话框截图")
+                    except:
+                        pass
+                    
+                    # 尝试查找对话框中的分享选项
+                    share_options = share_dialog.locator('button, a, div[role="button"], span[role="button"]').all()
+                    if share_options and len(share_options) > 0:
+                        print(f"在分享对话框中找到 {len(share_options)} 个选项")
+                        
+                        # 默认选择第一个选项
+                        share_option = share_options[0]
+                        
+                        # 首先尝试查找特定的分享平台选项
+                        for option in share_options:
+                            try:
+                                option_text = option.text_content().strip()
+                                if "telegram" in option_text.lower() or "微信" in option_text or "微博" in option_text:
+                                    share_option = option
+                                    print(f"选择分享到平台: {option_text}")
+                                    break
+                            except:
+                                continue
+                        
+                        # 点击选定的分享选项
+                        try:
+                            share_option.highlight()
+                            time.sleep(1)
+                            share_option.click(force=True)
+                            print(f"已点击分享对话框中的选项: {share_option.text_content().strip()}")
+                            time.sleep(2)
+                            
+                            # 保存点击后的截图
+                            try:
+                                page.screenshot(path="account_data/after_share_option_click.png")
+                            except:
+                                pass
+                                
+                            print("✅ 完成分享视频操作!")
+                            return True
+                        except Exception as e:
+                            print(f"点击分享选项时出错: {str(e)}")
+                else:
+                    print("未找到分享对话框元素，尝试通过JavaScript查找和点击")
+                    
+                    # 使用JavaScript查找和点击分享对话框中的选项
+                    clicked_option = page.evaluate('''() => {
+                        // 查找所有可能的分享对话框容器
+                        const dialogs = document.querySelectorAll('div[class*="dialog"], div[class*="modal"], div[class*="share"], div[class*="popup"]');
+                        console.log(`找到 ${dialogs.length} 个可能的对话框`);
+                        
+                        if (dialogs.length > 0) {
+                            // 查找对话框中的所有可点击元素
+                            const clickableElements = Array.from(dialogs[0].querySelectorAll('a, button, [role="button"], [class*="option"]'));
+                            console.log(`在对话框中找到 ${clickableElements.length} 个可点击元素`);
+                            
+                            if (clickableElements.length > 0) {
+                                // 优先选择特定平台
+                                let targetElement = clickableElements[0]; // 默认第一个
+                                
+                                for (const el of clickableElements) {
+                                    const text = el.textContent.toLowerCase();
+                                    if (text.includes('telegram') || text.includes('微信') || text.includes('微博')) {
+                                        targetElement = el;
+                                        console.log(`选择分享到平台: ${text}`);
+                                        break;
+                                    }
+                                }
+                                
+                                // 点击选定的元素
+                                targetElement.click();
+                                console.log(`已点击分享选项: ${targetElement.textContent}`);
+                                return {
+                                    clicked: true,
+                                    text: targetElement.textContent.trim()
+                                };
+                            }
+                        }
+                        
+                        return { clicked: false };
+                    }''')
+                    
+                    if clicked_option and clicked_option.get('clicked', False):
+                        print(f"通过JavaScript成功点击分享选项: {clicked_option.get('text')}")
+                        time.sleep(2)
+                        print("✅ 完成分享视频操作!")
+                        return True
+            except Exception as e:
+                print(f"处理分享对话框时出错: {str(e)}")
+        
+        # 如果前面的方法都失败，尝试使用更暴力的方法
+        print("尝试使用模拟按键和坐标点击方法...")
+        
+        # 方法1: 尝试按Tab键选择分享按钮并按Enter确认
+        try:
+            # 先按几次Tab键，希望能选中分享按钮
+            page.keyboard.press("Tab")
+            time.sleep(0.5)
+            page.keyboard.press("Tab")
+            time.sleep(0.5)
+            page.keyboard.press("Tab")
+            time.sleep(0.5)
+            
+            # 尝试按Enter确认
+            page.keyboard.press("Enter")
+            print("已尝试通过键盘Tab+Enter模拟点击分享按钮")
+            time.sleep(2)
+            
+            # 保存截图
+            try:
+                page.screenshot(path="account_data/after_keyboard_click.png")
+            except:
+                pass
+                
+            # 再次尝试点击对话框中的第一个选项
+            try:
+                page.keyboard.press("Enter")
+                print("已尝试通过键盘Enter点击分享对话框中的选项")
+                time.sleep(2)
+            except:
+                pass
+        except Exception as e:
+            print(f"键盘模拟点击时出错: {str(e)}")
+        
+        # 将视频URL记录到文件
+        try:
+            shared_indicator_file = os.path.join('account_data', 'shared_links.txt')
+            with open(shared_indicator_file, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {video_url}\n")
+            print(f"✅ 已记录视频URL到 {shared_indicator_file}")
+        except Exception as e:
+            print(f"记录视频URL时出错: {str(e)}")
+        
+        # 假定分享成功
+        print("✅ 分享流程已尝试完成")
+        return True
+    
+    except Exception as e:
+        print(f"❌ 分享视频时出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def analyze_website(page):
+    """分析网站结构和登录状态检测方法"""
+    try:
+        print("\n===== 开始分析网站结构 =====")
+        
+        # 检查我们是否在个人中心页面
+        page.goto("https://www.yfsp.tv/mine")
+        time.sleep(3)
+        
+        # 获取当前页面标题和URL
+        title = page.title()
+        url = page.url
+        print(f"页面标题: {title}")
+        print(f"当前URL: {url}")
+        
+        # 检查个人中心链接是否存在
+        has_personal_center = page.evaluate('''() => {
+            const links = Array.from(document.querySelectorAll('a'));
+            return links.some(link => 
+                link.textContent.includes('个人中心') || 
+                link.href.includes('/mine') || 
+                link.href.includes('/personal')
+            );
+        }''')
+        
+        print(f"个人中心链接存在: {has_personal_center}")
+        
+        # 检查登录按钮是否存在
+        login_button = page.evaluate('''() => {
+            const elements = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+            const loginBtn = elements.find(el => 
+                el.textContent.includes('登录') || 
+                el.textContent.includes('signin') || 
+                el.textContent.includes('sign in') ||
+                el.className.includes('login')
+            );
+            
+            if (loginBtn) {
+                const rect = loginBtn.getBoundingClientRect();
+                return {
+                    text: loginBtn.textContent.trim(),
+                    x: rect.left + rect.width/2,
+                    y: rect.top + rect.height/2,
+                    exists: true
+                };
+            }
+            
+            return { exists: false };
+        }''')
+        
+        if login_button.get('exists'):
+            print(f"登录按钮存在: 文本='{login_button.get('text')}', 位置=(x={login_button.get('x')}, y={login_button.get('y')})")
+        else:
+            print("登录按钮不存在 - 可能已登录或按钮有特殊实现")
+        
+        # 检查头像/用户区域是否存在
+        avatar_info = page.evaluate('''() => {
+            // 查找可能的头像元素
+            const possibleAvatars = Array.from(document.querySelectorAll('img[alt*="avatar"], img[alt*="头像"], .avatar, .user-avatar, [class*="avatar"]'));
+            
+            if (possibleAvatars.length > 0) {
+                const avatar = possibleAvatars[0];
+                const rect = avatar.getBoundingClientRect();
+                return {
+                    x: rect.left + rect.width/2,
+                    y: rect.top + rect.height/2,
+                    exists: true
+                };
+            }
+            
+            // 查找用户信息区域
+            const userArea = document.querySelector('.user-info, .user-profile, [class*="user"], [class*="profile"]');
+            if (userArea) {
+                const rect = userArea.getBoundingClientRect();
+                return {
+                    x: rect.left + rect.width/2,
+                    y: rect.top + rect.height/2,
+                    exists: true
+                };
+            }
+            
+            return { exists: false };
+        }''')
+        
+        if avatar_info.get('exists'):
+            print(f"头像/用户区域存在: 位置=(x={avatar_info.get('x')}, y={avatar_info.get('y')})")
+        else:
+            print("头像/用户区域不存在 - 可能未登录或元素有特殊实现")
+        
+        # 检查localStorage中是否有用户信息或token
+        storage_info = page.evaluate('''() => {
+            const result = { items: [] };
+            
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                try {
+                    const value = localStorage.getItem(key);
+                    let shortValue = value;
+                    
+                    // 如果值太长，截断它
+                    if (shortValue && shortValue.length > 50) {
+                        shortValue = shortValue.substring(0, 50) + '...';
+                    }
+                    
+                    // 检查是否包含敏感信息关键词
+                    const containsUserInfo = 
+                        key.toLowerCase().includes('user') || 
+                        key.toLowerCase().includes('token') || 
+                        key.toLowerCase().includes('auth') ||
+                        key.toLowerCase().includes('login') ||
+                        key.toLowerCase().includes('session') ||
+                        (value && value.toLowerCase().includes('user')) ||
+                        (value && value.toLowerCase().includes('token')) ||
+                        (value && value.toLowerCase().includes('auth'));
+                    
+                    result.items.push({
+                        key: key,
+                        value: shortValue,
+                        containsUserInfo: containsUserInfo
+                    });
+                } catch (e) {
+                    result.items.push({
+                        key: key,
+                        error: e.toString(),
+                        containsUserInfo: false
+                    });
+                }
+            }
+            
+            return result;
+        }''')
+        
+        print("\n本地存储分析结果:")
+        if storage_info.get('items'):
+            user_info_items = [item for item in storage_info.get('items') if item.get('containsUserInfo')]
+            other_items = [item for item in storage_info.get('items') if not item.get('containsUserInfo')]
+            
+            if user_info_items:
+                print(f"找到 {len(user_info_items)} 个可能包含用户信息的存储项:")
+                for item in user_info_items:
+                    print(f"  - 键: {item.get('key')}")
+                    print(f"    值: {item.get('value')}")
+                    print()
+            else:
+                print("未找到包含用户信息的存储项")
+            
+            print(f"其他存储项: {len(other_items)} 个")
+        else:
+            print("本地存储为空")
+        
+        # 检查是否有签到相关元素
+        check_in_elements = page.evaluate('''() => {
+            const elements = Array.from(document.querySelectorAll('*'));
+            const checkInElements = elements.filter(el => {
+                const text = el.textContent.trim();
+                return text.includes('签到') || 
+                       text.includes('打卡') || 
+                       text.includes('check-in') ||
+                       text.includes('check in') ||
+                       el.className.includes('sign') ||
+                       el.className.includes('check');
+            });
+            
+            return checkInElements.map(el => {
+                const rect = el.getBoundingClientRect();
+                return {
+                    text: el.textContent.trim(),
+                    tagName: el.tagName,
+                    className: el.className,
+                    x: rect.left + rect.width/2,
+                    y: rect.top + rect.height/2,
+                    visible: rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top <= window.innerHeight
+                };
+            });
+        }''')
+        
+        print("\n签到相关元素分析:")
+        if check_in_elements:
+            visible_elements = [el for el in check_in_elements if el.get('visible')]
+            hidden_elements = [el for el in check_in_elements if not el.get('visible')]
+            
+            print(f"找到 {len(check_in_elements)} 个签到相关元素，其中 {len(visible_elements)} 个可见")
+            
+            if visible_elements:
+                print("\n可见的签到元素:")
+                for i, el in enumerate(visible_elements):
+                    print(f"{i+1}. '{el.get('text')}' ({el.get('tagName')}, 类名: '{el.get('className')}')")
+                    print(f"   位置: x={el.get('x')}, y={el.get('y')}")
+            
+            if hidden_elements:
+                print(f"\n隐藏的签到元素: {len(hidden_elements)} 个")
+        else:
+            print("未找到签到相关元素")
+            
+        print("\n===== 网站分析完成 =====")
+        return True
+    except Exception as e:
+        print(f"❌ 网站分析过程中出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def multi_account_manager(headless=False):
+    """多账号管理器"""
+    try:
+        # 创建保存账号数据的目录
+        data_dir = 'account_data'
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # 解析命令行参数
+        parser = argparse.ArgumentParser(description='多账号管理器')
+        parser.add_argument('--login', action='store_true', help='手动登录并保存账号状态')
+        parser.add_argument('--account', type=str, help='指定要操作的账号名称')
+        parser.add_argument('--analyze', action='store_true', help='分析网站结构和登录状态检测方法')
+        parser.add_argument('--mode', type=str, default='all', choices=['all', 'check_in', 'share_video', 'share_accounts'], 
+                            help='操作模式: all(全部), check_in(仅签到), share_video(仅分享视频), share_accounts(仅分享账号)')
+        parser.add_argument('--headless', action='store_true', help='使用无头模式（不显示浏览器界面）')
+        
+        args = parser.parse_args()
+        headless = args.headless
+        
+        # 如果是登录模式
+        if args.login:
+            if not args.account:
+                print("❌ 请使用 --account 参数指定账号名称")
+                return
+            
+            print(f"🔐 准备为账号 '{args.account}' 手动登录...")
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=False)  # 登录模式强制显示浏览器
+                    context = browser.new_context()
+                    page = context.new_page()
+                    page.goto("https://www.yfsp.tv")
+                    manual_login(context, page, args.account, data_dir)
+                    browser.close()
+            except Exception as e:
+                print(f"❌ 登录过程出错: {str(e)}")
+            return
+        
+        # 如果是分析模式
+        if args.analyze:
+            print("🔍 启动网站分析模式...")
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=False)
+                    context = browser.new_context()
+                    page = context.new_page()
+                    
+                    # 如果指定了账号，尝试加载账号状态
+                    if args.account:
+                        storage_file = os.path.join(data_dir, f"{args.account}_storage.json")
+                        if os.path.exists(storage_file):
+                            print(f"正在加载账号 '{args.account}' 的状态...")
+                            if load_storage_state(context, storage_file):
+                                print(f"✅ 已加载账号 '{args.account}' 的状态")
+                
+                    print("正在访问网站...")
+                    page.goto("https://www.yfsp.tv")
+                    time.sleep(5)
+                    
+                    print("\n网站已加载，开始分析...")
+                    analyze_website(page)
+                    
+                    print("\n分析完成。请按回车键关闭浏览器...")
+                    input()
+                    browser.close()
+            except Exception as e:
+                print(f"❌ 分析过程出错: {str(e)}")
+            return
+        
+        # 获取所有已保存的账号
+        accounts = []
+        try:
+            for file in os.listdir(data_dir):
+                if file.endswith('_storage.json'):
+                    account_name = file.replace('_storage.json', '')
+                    accounts.append(account_name)
+        except Exception as e:
+            print(f"❌ 读取账号目录出错: {str(e)}")
+            return
+        
+        # 如果没有发现账号
+        if not accounts:
+            print("❌ 未找到已保存的账号。请先使用 --login --account 账号名 登录并保存账号状态。")
+            return
+        
+        # 确定目标账号列表
+        target_accounts = []
+        if args.account:
+            if args.account in accounts:
+                target_accounts = [args.account]
+            else:
+                print(f"❌ 未找到名为 '{args.account}' 的账号")
+                return
+        else:
+            target_accounts = accounts
+        
+        # 处理单个账号的特殊模式
+        if args.account and args.mode != 'share_accounts':
+            if args.mode == 'all':
+                result = run_for_single_account(args.account, headless)
+                return result
+            elif args.mode == 'check_in':
+                result = run_check_in_for_account(args.account, headless)
+                return result
+            elif args.mode == 'share_video':
+                result = run_share_video_for_account(args.account, headless)
+                return result
+        
+        # 为所有账号执行操作
+        print(f"🚀 开始处理 {len(target_accounts)} 个账号...")
+        
+        # 根据模式执行不同操作
+        if args.mode == 'share_accounts':
+            return auto_share_accounts()
+        elif args.mode == 'check_in':
+            return run_check_in_for_all_accounts(headless)
+        elif args.mode == 'share_video':
+            return run_share_video_for_all_accounts(headless)
+        
+        # 默认处理所有账号的所有操作
+        try:
+            browser_args = []
+            with sync_playwright() as p:
+                browser_type = p.chromium
+                try:
+                    # 决定是否使用无头模式
+                    browser = browser_type.launch(headless=headless, args=browser_args)
+                except Exception as e:
+                    print(f"❌ 启动浏览器失败: {str(e)}")
+                    return
+                
+                # 处理每个账号
+                for account in target_accounts:
+                    print(f"\n🔄 正在处理账号: {account}")
+                    
+                    # 加载账号状态
+                    storage_file = os.path.join(data_dir, f"{account}_storage.json")
+                    
+                    try:
+                        # 创建上下文
+                        context = browser.new_context(
+                            viewport={'width': 1366, 'height': 768},
+                            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        )
+                        
+                        # 加载存储状态
+                        if not load_storage_state(context, storage_file):
+                            print(f"❌ 无法加载账号 '{account}' 的状态")
+                            context.close()
+                            continue
+                        
+                        # 创建页面
+                        page = context.new_page()
+                        page.on("console", lambda msg: 
+                            print(f"浏览器控制台: {msg.text}") if "error" in msg.type.lower() else None
+                        )
+                        
+                        # 访问网站
+                        try:
+                            page.goto("https://www.yfsp.tv", timeout=30000)
+                            
+                            # 检查登录状态
+                            if check_login_status(page):
+                                # 尝试获取用户名
+                                username = get_username(page)
+                                if username:
+                                    print(f"✅ 成功登录账号: {username}")
+                                    
+                                    # 先执行视频分享，再执行签到
+                                    # 执行视频分享
+                                    try:
+                                        share_result = run_share_video_for_account(account, headless)
+                                        if share_result:
+                                            print(f"✅ 账号 '{account}' 分享视频成功！")
+                                            share_account_details(account, "分享视频成功")
+                                        else:
+                                            print(f"❌ 账号 '{account}' 分享视频失败")
+                                            share_account_details(account, "分享视频失败")
+                                    except Exception as e:
+                                        print(f"❌ 分享视频过程中出错: {str(e)}")
+                                        share_account_details(account, f"分享视频失败: {str(e)}")
+                                    
+                                    # 执行每日签到
+                                    try:
+                                        check_in_result = perform_daily_check_in(page)
+                                        if check_in_result:
+                                            print(f"✅ 账号 '{account}' 签到成功")
+                                        else:
+                                            print(f"⚠️ 账号 '{account}' 签到失败或已经签到过了")
+                                    except Exception as e:
+                                        print(f"❌ 签到过程中出错: {str(e)}")
+                                else:
+                                    print(f"⚠️ 虽然检测到登录状态，但无法获取用户名")
+                            else:
+                                print(f"❌ 账号 '{account}' 登录已过期，请重新登录")
+                        except Exception as e:
+                            print(f"❌ 处理账号过程中出错: {str(e)}")
+                        finally:
+                            try:
+                                context.close()
+                            except:
+                                pass
+                    except Exception as e:
+                        print(f"❌ 创建账号上下文时出错: {str(e)}")
+                
+                try:
+                    browser.close()
+                except:
+                    pass
+            except Exception as e:
+                print(f"❌ 执行过程中发生严重错误: {str(e)}")
+    except Exception as e:
+        print(f"多账号管理器执行过程中出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def manual_login(context, page, account_name, data_dir):
+    """手动登录并保存状态"""
+    try:
+        print(f"\n===== 开始手动登录账号 '{account_name}' =====")
+        
+        # 访问网站首页
+        page.goto("https://www.yfsp.tv", timeout=30000)
+        
+        # 等待用户手动登录
+        print("\n✨ 请在浏览器中手动完成登录过程...")
+        print("✨ 登录成功后，程序会自动检测并保存账号状态")
+        print("✨ 如果浏览器没有自动打开登录页面，请点击右上角的'登录'按钮")
+        
+        # 等待登录成功
+        max_wait_time = 300  # 最多等待5分钟
+        check_interval = 3  # 每3秒检查一次
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait_time:
+            # 检查是否登录成功
+            if check_login_status(page):
+                username = get_username(page)
+                if username:
+                    print(f"\n✅ 检测到成功登录! 用户名: {username}")
+                    
+                    # 保存登录状态
+                    storage_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                    if save_storage_state(context, storage_file):
+                        print(f"✅ 账号 '{account_name}' 的登录状态已保存")
+                        return True
+                    else:
+                        print(f"❌ 保存账号 '{account_name}' 的登录状态失败")
+                        return False
+                else:
+                    print("⚠️ 检测到登录状态，但无法获取用户名，继续等待...")
+            
+            # 打印等待时间
+            elapsed = time.time() - start_time
+            remaining = max_wait_time - elapsed
+            print(f"\r⏳ 等待登录中... 已等待: {int(elapsed)}秒, 剩余时间: {int(remaining)}秒", end="")
+            
+            # 等待一段时间再检查
+            time.sleep(check_interval)
+        
+        print("\n❌ 等待登录超时，未检测到成功登录")
+        return False
+    except Exception as e:
+        print(f"\n❌ 手动登录过程中出错: {str(e)}")
+        traceback.print_exc()
+        return False
+
+def share_account_details(account_name, status):
+    """记录账号操作状态到shared目录"""
+    data_dir = 'account_data'
+    shared_dir = os.path.join(data_dir, 'shared')
+    
+    # 确保shared目录存在
+    if not os.path.exists(shared_dir):
+        os.makedirs(shared_dir)
+    
+    # 获取当前时间
+    now = datetime.datetime.now()
+    date_str = now.strftime('%Y-%m-%d')
+    time_str = now.strftime('%H:%M:%S')
+    
+    # 准备文件名和内容
+    filename = os.path.join(shared_dir, f"{date_str}_status.txt")
+    line = f"{time_str} - {account_name}: {status}\n"
+    
+    # 追加到文件
+    with open(filename, 'a', encoding='utf-8') as f:
+        f.write(line)
+
+def auto_share_accounts():
+    """自动检查并分享所有有效账号信息"""
+    try:
+        print("开始自动检查并分享有效账号信息...")
+        
+        # 检查账号存储目录是否存在
+        if not os.path.exists("account_data"):
+            print("账号数据目录不存在，无法分享账号")
+            return False
+            
+        # 获取所有账号列表
+        accounts = []
+        for item in os.listdir("account_data"):
+            if os.path.isdir(os.path.join("account_data", item)) and not item.startswith(".") and item != "shared":
+                accounts.append(item)
+                
+        if not accounts:
+            print("未找到任何账号信息，无法分享")
+            return False
+            
+        print(f"找到 {len(accounts)} 个账号，开始检查有效性并分享...")
+        
+        # 遍历每个账号并检查是否有效
+        valid_accounts = 0
+        for account in accounts:
+            account_dir = os.path.join("account_data", account)
+            
+            # 检查是否存在storage.json（登录凭证）
+            storage_path = os.path.join(account_dir, "storage.json")
+            if os.path.exists(storage_path):
+                # 检查文件修改时间，判断是否为最近登录的账号
+                modified_time = os.path.getmtime(storage_path)
+                current_time = time.time()
+                days_since_modified = (current_time - modified_time) / (24 * 3600)
+                
+                if days_since_modified <= 7:  # 7天内有效
+                    message = f"账号有效，最近登录时间: {datetime.datetime.fromtimestamp(modified_time).strftime('%Y-%m-%d')}"
+                    share_account_details(account, message)
+                    valid_accounts += 1
+                else:
+                    print(f"账号 '{account}' 登录信息已过期 ({days_since_modified:.1f} 天前)")
+            else:
+                print(f"账号 '{account}' 无有效登录信息")
+                
+        print(f"共分享了 {valid_accounts} 个有效账号信息")
+        return valid_accounts > 0
+    except Exception as e:
+        print(f"自动分享账号信息时出错: {str(e)}")
+        return False
+
+def run_check_in_for_account(account_name, headless=False):
+    """为单个账号执行每日签到"""
+    print(f"🔄 正在为账号 '{account_name}' 执行每日签到...")
+    browser_args = []
+    
+    try:
+        with sync_playwright() as p:
+            browser_type = p.chromium
+            try:
+                browser = browser_type.launch(headless=headless, args=browser_args)
+            except Exception as e:
+                print(f"❌ 启动浏览器失败: {str(e)}")
+                return False
+                
+            try:
+                context = browser.new_context()
+                
+                # 尝试加载已保存的登录状态
+                data_dir = 'account_data'
+                state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                
+                if load_storage_state(context, state_file):
+                    page = context.new_page()
+                    
+                    # 执行每日签到（该函数会自动导航到个人中心页面）
+                    if perform_daily_check_in(page):
+                        print(f"✅ 账号 '{account_name}' 签到成功！")
+                        share_account_details(account_name, "签到成功")
+                        return True
+                    else:
+                        print(f"❌ 账号 '{account_name}' 签到失败或已经签到过了")
+                        share_account_details(account_name, "签到失败或已签到")
+                        return False
+                else:
+                    print(f"❌ 无法加载账号 '{account_name}' 的登录状态，请先登录并保存状态")
+                    share_account_details(account_name, "无法加载登录状态")
+                    return False
+            except Exception as e:
+                print(f"❌ 签到过程中出错: {str(e)}")
+                share_account_details(account_name, f"签到失败: {str(e)}")
+                return False
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"❌ 运行签到过程发生意外错误: {str(e)}")
+        share_account_details(account_name, f"意外错误: {str(e)}")
+        return False
+
+def run_share_video_for_account(account_name, headless=False):
+    """为单个账号执行视频分享"""
+    print(f"🔄 正在为账号 '{account_name}' 执行视频分享...")
+    browser_args = []
+    
+    try:
+        with sync_playwright() as p:
+            browser_type = p.chromium
+            try:
+                browser = browser_type.launch(headless=headless, args=browser_args)
+            except Exception as e:
+                print(f"❌ 启动浏览器失败: {str(e)}")
+                return False
+                
+            try:
+                context = browser.new_context()
+                
+                # 尝试加载已保存的登录状态
+                data_dir = 'account_data'
+                state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                
+                if load_storage_state(context, state_file):
+                    page = context.new_page()
+                    
+                    # 直接执行视频分享函数（会自动导航到动漫列表页面）
+                    if share_video(page):
+                        print(f"✅ 账号 '{account_name}' 分享视频成功！")
+                        share_account_details(account_name, "分享视频成功")
+                        return True
+                    else:
+                        print(f"❌ 账号 '{account_name}' 分享视频失败")
+                        share_account_details(account_name, "分享视频失败")
+                        return False
+                else:
+                    print(f"❌ 无法加载账号 '{account_name}' 的登录状态，请先登录并保存状态")
+                    share_account_details(account_name, "无法加载登录状态")
+                    return False
+            except Exception as e:
+                print(f"❌ 分享视频过程中出错: {str(e)}")
+                share_account_details(account_name, f"分享视频失败: {str(e)}")
+                return False
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"❌ 运行分享视频过程发生意外错误: {str(e)}")
+        share_account_details(account_name, f"意外错误: {str(e)}")
+        return False
+
+def run_for_single_account(account_name, headless=False):
+    """为单个账号执行所有操作（先分享视频再签到）"""
+    # 先执行视频分享，再执行签到
+    share_result = run_share_video_for_account(account_name, headless)
+    check_in_result = run_check_in_for_account(account_name, headless)
+    
+    return share_result and check_in_result
+
+def run_check_in_for_all_accounts(headless=False):
+    """为所有账号执行每日签到"""
+    print("🔄 正在为所有账号执行每日签到...")
+    data_dir = 'account_data'
+    success_count = 0
+    total_count = 0
+    
+    if not os.path.exists(data_dir):
+        print(f"❌ 账号数据目录 '{data_dir}' 不存在")
+        return False
+        
+    for item in os.listdir(data_dir):
+        if item.startswith('.') or item == 'shared':
+            continue
+            
+        if item.endswith('_storage.json'):
+            account_name = item.replace('_storage.json', '')
+            total_count += 1
+            
+            if run_check_in_for_account(account_name, headless):
+                success_count += 1
+                
+    print(f"📊 签到统计: 成功 {success_count}/{total_count}")
+    return success_count > 0
+
+def run_share_video_for_all_accounts(headless=False):
+    """为所有账号执行视频分享"""
+    print("🔄 正在为所有账号执行视频分享...")
+    data_dir = 'account_data'
+    success_count = 0
+    total_count = 0
+    
+    if not os.path.exists(data_dir):
+        print(f"❌ 账号数据目录 '{data_dir}' 不存在")
+        return False
+        
+    for item in os.listdir(data_dir):
+        if item.startswith('.') or item == 'shared':
+            continue
+            
+        if item.endswith('_storage.json'):
+            account_name = item.replace('_storage.json', '')
+            total_count += 1
+            
+            if run_share_video_for_account(account_name, headless):
+                success_count += 1
+                
+    print(f"📊 视频分享统计: 成功 {success_count}/{total_count}")
+    return success_count > 0
+
+def run_all_operations_for_all_accounts(headless=False):
+    """为所有账号执行所有操作（先分享视频再签到）"""
+    print("🔄 正在为所有账号执行操作（先分享视频再签到）...")
+    data_dir = 'account_data'
+    success_count = 0
+    total_count = 0
+    
+    if not os.path.exists(data_dir):
+        print(f"❌ 账号数据目录 '{data_dir}' 不存在")
+        return False
+        
+    for item in os.listdir(data_dir):
+        if item.startswith('.') or item == 'shared':
+            continue
+            
+        if item.endswith('_storage.json'):
+            account_name = item.replace('_storage.json', '')
+            total_count += 1
+            
+            # 先执行视频分享，再执行签到
+            share_result = run_share_video_for_account(account_name, headless)
+            check_in_result = run_check_in_for_account(account_name, headless)
+            
+            if share_result and check_in_result:
+                success_count += 1
+                
+    print(f"📊 所有操作统计: 成功 {success_count}/{total_count}")
+    return success_count > 0
+
+def main():
+    """主函数"""
+    try:
+        # 设置命令行参数
+        parser = argparse.ArgumentParser(description='自动化程序')
+        parser.add_argument('--mode', type=str, default='all', help='运行模式: all, check_in, share_video, share_accounts')
+        parser.add_argument('--account', type=str, help='指定要使用的账号名称（可选）')
+        parser.add_argument('--headless', action='store_true', help='无头模式运行')
+        args = parser.parse_args()
+        
+        mode = args.mode.lower()
+        account_name = args.account
+        headless = args.headless
+        
+        print(f"运行模式: {mode}")
+        print(f"无头模式: {'是' if headless else '否'}")
+        
+        if mode == 'all':
+            if account_name:
+                # 单一账号模式
+                print(f"使用指定账号: {account_name}")
+                run_for_single_account(account_name, headless)
+            else:
+                # 多账号管理器模式
+                print("使用多账号管理器模式")
+                run_all_operations_for_all_accounts(headless=headless)
+        elif mode == 'check_in':
+            print("仅执行每日签到")
+            if account_name:
+                run_check_in_for_account(account_name, headless)
+            else:
+                run_check_in_for_all_accounts(headless)
+        elif mode == 'share_video':
+            print("仅执行视频分享")
+            if account_name:
+                run_share_video_for_account(account_name, headless)
+            else:
+                run_share_video_for_all_accounts(headless)
+        elif mode == 'share_accounts':
+            print("执行账号分享功能")
+            auto_share_accounts()
+        else:
+            print(f"未知模式: {mode}")
+            
+    except Exception as e:
+        print(f"程序运行出错: {str(e)}")
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()

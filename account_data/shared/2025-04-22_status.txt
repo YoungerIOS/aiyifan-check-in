@@ -1,0 +1,99 @@
+00:00:07 - soyoungso686@gmail.com: 签到成功
+00:07:48 - soyoungso686@gmail.com: 签到失败或已签到
+00:09:23 - soyoungso686@gmail.com: 签到失败或已签到
+00:11:25 - soyoungso686@gmail.com: 签到失败或已签到
+00:13:34 - soyoungso686@gmail.com: 签到成功
+00:14:35 - soyoungso686@gmail.com: 签到成功
+00:52:20 - soyoungto686@gmail.com: 无法加载登录状态
+00:58:57 - soyoungso686@gmail.com: 意外错误: It looks like you are using Playwright Sync API inside the asyncio loop.
+Please use the Async API instead.
+00:58:57 - soyoungso686@gmail.com: 分享视频失败
+01:33:23 - soyoungso686@gmail.com: 签到成功
+02:08:19 - soyoungso686@gmail.com: 签到成功
+02:18:12 - soyoungso686@gmail.com: 分享视频失败
+02:18:22 - soyoungso686@gmail.com: 签到成功
+02:30:10 - soyoungso686@gmail.com: 分享视频失败
+02:30:20 - soyoungso686@gmail.com: 签到成功
+02:48:09 - soyoungso686@gmail.com: 分享视频成功
+02:48:54 - soyoungso686@gmail.com: 签到成功
+02:51:11 - soyoungso686@gmail.com: 分享视频成功
+02:51:54 - soyoungso686@gmail.com: 签到成功
+03:08:21 - soyoungso686@gmail.com: 分享视频成功
+03:09:06 - soyoungso686@gmail.com: 签到成功
+03:20:46 - soyoungso686@gmail.com: 分享视频成功
+03:21:31 - soyoungso686@gmail.com: 签到成功
+03:29:04 - soyoungso686@gmail.com: 分享视频成功
+03:29:13 - soyoungso686@gmail.com: 签到成功
+03:30:20 - soyoungso686@gmail.com: 分享视频成功
+03:30:29 - soyoungso686@gmail.com: 签到成功
+03:35:29 - soyoungso686@gmail.com: 分享视频成功
+03:35:39 - soyoungso686@gmail.com: 签到成功
+03:45:20 - soyoungso686@gmail.com: 分享视频成功
+03:45:29 - soyoungso686@gmail.com: 签到成功
+03:54:00 - soyoungso686@gmail.com: 分享视频成功
+03:54:09 - soyoungso686@gmail.com: 签到成功
+04:00:01 - test1: 无法加载登录状态
+04:04:39 - test1: 无法加载登录状态
+04:23:26 - soyoungso686@gmail.com: 分享视频成功
+04:23:34 - soyoungso686@gmail.com: 签到成功
+11:56:46 - soyoungso686@gmail.com: 分享视频成功
+11:56:53 - soyoungso686@gmail.com: 签到成功
+11:57:49 - soyoungso686@gmail.com: 分享视频成功
+11:57:57 - soyoungso686@gmail.com: 签到成功
+12:50:33 - soyoungto686@gmail.com: 签到成功
+16:09:46 - soyoungso686@gmail.com: 签到成功
+16:10:48 - soyoungso686@gmail.com: 分享视频成功
+16:10:58 - soyoungso686@gmail.com: 签到成功
+16:21:27 - soyoungso686@gmail.com: 分享视频成功
+16:21:41 - soyoungso686@gmail.com: 签到成功
+16:30:28 - soyoungso686@gmail.com: 签到成功
+16:31:13 - soyoungso686@gmail.com: 分享视频成功
+16:31:40 - soyoungso686@gmail.com: 签到成功
+16:40:36 - soyoungso686@gmail.com: 分享视频成功
+16:41:03 - soyoungso686@gmail.com: 签到成功
+17:39:34 - soyoungso686@gmail.com: 分享视频成功
+17:40:01 - soyoungso686@gmail.com: 签到成功
+18:40:00 - soyoungso686@gmail.com: 分享视频成功
+18:40:33 - soyoungso686@gmail.com: 签到成功
+18:43:02 - soyoungso686@gmail.com: 分享视频失败
+18:43:05 - soyoungso686@gmail.com: 签到失败: Target page, context or browser has been closed
+18:57:06 - soyoungso686@gmail.com: 分享视频成功
+18:57:39 - soyoungso686@gmail.com: 签到成功
+18:59:52 - soyoungso686@gmail.com: 分享视频成功
+19:00:25 - soyoungso686@gmail.com: 签到成功
+19:15:40 - soyoungso686@gmail.com: 登录状态异常
+19:15:51 - soyoungso686@gmail.com: 登录状态异常
+19:16:43 - soyoungso686@gmail.com: 登录状态异常
+19:16:50 - soyoungso686@gmail.com: 登录状态异常
+19:28:04 - soyoungso686@gmail.com: 登录失败
+19:33:12 - soyoungso686@gmail.com: 登录失败
+19:46:52 - soyoungso686@gmail.com: 登录失败
+19:47:32 - soyoungso686@gmail.com: 签到失败: DOMException: Failed to execute 'querySelector' on 'Document': 'a:not([style*="display: none"]):not([hidden]):has-text("登录")' is not a valid selector.
+    at eval (eval at evaluate (:226:30), <anonymous>:4:41)
+    at UtilityScript.evaluate (<anonymous>:233:19)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+20:00:38 - soyoungso686@gmail.com: 签到失败: DOMException: Failed to execute 'querySelector' on 'Document': 'a:not([style*="display: none"]):not([hidden]):has-text("登录")' is not a valid selector.
+    at eval (eval at evaluate (:226:30), <anonymous>:4:45)
+    at UtilityScript.evaluate (<anonymous>:233:19)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+20:00:47 - soyoungso686@gmail.com: 分享视频失败: DOMException: Failed to execute 'querySelector' on 'Document': 'a:not([style*="display: none"]):not([hidden]):has-text("登录")' is not a valid selector.
+    at eval (eval at evaluate (:226:30), <anonymous>:4:45)
+    at UtilityScript.evaluate (<anonymous>:233:19)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+20:08:02 - soyoungso686@gmail.com: 分享视频成功
+20:08:49 - soyoungso686@gmail.com: 分享视频成功
+20:09:15 - soyoungso686@gmail.com: 签到失败: DOMException: Failed to execute 'querySelector' on 'Document': 'a:not([style*="display: none"]):not([hidden]):has-text("登录")' is not a valid selector.
+    at eval (eval at evaluate (:226:30), <anonymous>:4:45)
+    at UtilityScript.evaluate (<anonymous>:233:19)
+    at UtilityScript.<anonymous> (<anonymous>:1:44)
+20:16:15 - soyoungso686@gmail.com: 签到成功
+20:16:46 - soyoungso686@gmail.com: 签到成功
+20:17:27 - soyoungso686@gmail.com: 签到成功
+21:02:18 - soyoungso686@gmail.com: 签到成功
+21:02:49 - soyoungso686@gmail.com: 签到成功
+21:10:47 - soyoungso686@gmail.com: 签到成功
+21:11:33 - soyoungso686@gmail.com: 签到成功
+21:16:52 - soyoungso686@gmail.com: 签到成功
+21:28:16 - soyoungso686@gmail.com: 签到失败或已签到
+21:28:42 - soyoungso686@gmail.com: 签到失败或已签到
+21:32:00 - soyoungso686@gmail.com: 签到失败或已签到

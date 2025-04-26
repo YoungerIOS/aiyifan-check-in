@@ -1,0 +1,4 @@
+playwright==1.42.0
+argparse>=1.4.0
+schedule==1.2.1
+tenacity==8.2.3
