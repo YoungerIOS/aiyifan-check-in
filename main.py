@@ -1,3 +1,5 @@
+print("sys.argv:", sys.argv)
+
 import time
 import os
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
