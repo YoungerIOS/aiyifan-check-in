@@ -14,4 +14,4 @@ RUN pip install -r requirements.txt
 # 安装 Playwright 浏览器
 RUN python -m playwright install --with-deps
 
-CMD ["python", "main.py", "list"]
+CMD ["python", "main.py"]
