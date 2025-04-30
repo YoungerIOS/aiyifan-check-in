@@ -11,6 +11,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+import traceback
 
 # 配置日志
 logging.basicConfig(
@@ -2637,7 +2638,7 @@ def get_coins_for_all_accounts(headless=True):
         print("\n✅ 已发送邮件通知")
 
 def delete_account(account_name):
-    """删除指定账号
+    """删除指定账号"
     
     Args:
         account_name: 要删除的账号名称
