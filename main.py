@@ -1,21 +1,33 @@
-import time
 import os
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-import json
-import datetime
-import random
-import traceback
 import sys
+import json
+import time
+import logging
+import ssl
+from datetime import datetime
 import re
+import random
 import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-EMAIL_HOST = os.getenv("EMAIL_HOST") # SMTP服务器地址
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "465")) # SMTP端口（SSL通常是465）
-EMAIL_USER = os.getenv("EMAIL_USER") # 发件人邮箱
-EMAIL_PASS = os.getenv("EMAIL_PASS") # 邮箱授权码或密码
-EMAIL_TO   = os.getenv("EMAIL_TO")   # 收件人邮箱
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('aiyifan.log'),
+        logging.StreamHandler()
+    ]
+)
+
+# 邮件配置参数（本地固定值）
+EMAIL_HOST = "smtp.qq.com"  # SMTP服务器地址
+EMAIL_PORT = 465  # SMTP端口（SSL通常是465）
+EMAIL_USER = "358856615@qq.com"  # 发件人邮箱
+EMAIL_PASS = "jgbcljraqmalcage"  # 邮箱授权码或密码
+EMAIL_TO = "soyoungto686@gmail.com"  # 收件人邮箱
 
 def check_login_status(page):
     """检查是否已登录"""
@@ -259,7 +271,7 @@ def direct_click_sign_in_button(page):
                     print(f"尝试进入个人中心失败: {str(e)}")
         
         # 确认当前页面是否为个人中心
-        print(f"当前页面URL: {page.url}")
+        # print(f"当前页面URL: {page.url}")
         print(f"当前页面标题: {page.title()}")
 
         
@@ -551,7 +563,7 @@ def direct_click_sign_in_button(page):
             
             if dialog_info.get('found', False):
                 print("✅ 找到确认对话框")
-                print(f"对话框内容: {dialog_info.get('dialogContent', '')[:100]}...")
+                # print(f"对话框内容: {dialog_info.get('dialogContent', '')[:100]}...")
                 
                 confirm_button = dialog_info.get('confirmButton')
                 if confirm_button:
@@ -768,7 +780,6 @@ def share_video(page):
         for selector in video_selectors:
             found_videos = page.locator(selector).all()
             if found_videos and len(found_videos) > 0:
-                print(f"使用选择器 '{selector}' 找到 {len(found_videos)} 个视频链接")
                 videos = found_videos
                 break
         
@@ -811,7 +822,7 @@ def share_video(page):
                     # 直接导航到视频页面，而不是点击
                     video_href = selected_link.get('href')
                     video_url = "https://www.yfsp.tv" + video_href if video_href.startswith("/") else video_href
-                    print(f"直接导航到视频页面: {video_url}")
+                    # print(f"直接导航到视频页面: {video_url}")
                     page.goto(video_url, timeout=30000)
                     time.sleep(5)
                     
@@ -849,7 +860,7 @@ def share_video(page):
                 href = selected_video.get_attribute("href")
                 if href:
                     full_url = "https://www.yfsp.tv" + href if href.startswith("/") else href
-                    print(f"直接导航到视频页面: {full_url}")
+                    # print(f"直接导航到视频页面: {full_url}")
                     page.goto(full_url, timeout=30000)
                     time.sleep(5)
                     
@@ -883,7 +894,6 @@ def share_video(page):
         video_url = page.url
         video_title = page.title()
         print(f"当前视频: {video_title}")
-        print(f"视频URL: {video_url}")
         
         # 验证当前页面是否为视频页面
         if not ("/video/" in video_url or "/play/" in video_url or "/watch/" in video_url or "/anime/" in video_url):
@@ -1221,15 +1231,6 @@ def share_video(page):
         except Exception as e:
             print(f"键盘模拟点击时出错: {str(e)}")
         
-        # 将视频URL记录到文件
-        try:
-            shared_indicator_file = os.path.join('account_data', 'shared_links.txt')
-            with open(shared_indicator_file, 'a', encoding='utf-8') as f:
-                f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {video_url}\n")
-            print(f"✅ 已记录视频URL到 {shared_indicator_file}")
-        except Exception as e:
-            print(f"记录视频URL时出错: {str(e)}")
-        
         # 假定分享成功
         print("✅ 分享流程已尝试完成")
         return True
@@ -1251,7 +1252,7 @@ def share_account_details(account_name, status):
         os.makedirs(shared_dir)
     
     # 获取当前时间
-    now = datetime.datetime.now()
+    now = datetime.now()
     date_str = now.strftime('%Y-%m-%d')
     time_str = now.strftime('%H:%M:%S')
     
@@ -1276,11 +1277,11 @@ def force_click_sign_in_button(page):
             }
         }''')
         
-        print(f"页面URL: {page_content.get('url')}")
+        # print(f"页面URL: {page_content.get('url')}")
         print(f"页面标题: {page_content.get('title')}")
-        print(f"页面内容预览: {page_content.get('bodyText')[:200]}...")
         
         # 方法一：直接DOM点击
+        print("方法一：直接DOM点击...")
         success_dom = page.evaluate('''() => {
             console.log("开始DOM点击搜索");
             // 遍历页面中所有可见的元素
@@ -1351,7 +1352,7 @@ def force_click_sign_in_button(page):
         sign_areas = [300, 400, 500, 600, 700, 800]  # 可能的Y坐标值
         
         for scroll_y in sign_areas:
-            print(f"滚动到位置 y={scroll_y}")
+            # print(f"滚动到位置 y={scroll_y}")
             page.evaluate(f"window.scrollTo(0, {scroll_y})")
             time.sleep(2)
             
@@ -1387,12 +1388,12 @@ def force_click_sign_in_button(page):
                 });
             }''')
             
-            print(f"在当前视图找到 {len(elements_info)} 个可能相关的元素")
+            # print(f"在当前视图找到 {len(elements_info)} 个可能相关的元素")
             
             # 查找精确匹配"立即签到"的元素
             for i, elem in enumerate(elements_info):
-                print(f"元素 {i+1}: {elem.get('text')} ({elem.get('tag')})")
-                print(f"  位置: x={elem.get('position', {}).get('x')}, y={elem.get('position', {}).get('y')}")
+                # print(f"元素 {i+1}: {elem.get('text')} ({elem.get('tag')})")
+                # print(f"  位置: x={elem.get('position', {}).get('x')}, y={elem.get('position', {}).get('y')}")
                 
                 if "立即签到" in elem.get('text', ''):
                     print(f"✅ 找到精确匹配的'立即签到'元素!")
@@ -1538,7 +1539,7 @@ def force_click_sign_in_button(page):
             
             # 执行点击
             page.mouse.click(x, y)
-            print(f"✅ 已点击坐标位置 {i+1}")
+            # print(f"✅ 已点击坐标位置 {i+1}")
             
             # 等待可能的对话框
             time.sleep(2)
@@ -1719,7 +1720,7 @@ def check_dialog(page, recursion_depth=0):
         
         if dialog_info.get('found', False):
             print("✅ 找到对话框或确认元素!")
-            print(f"对话框内容: {dialog_info.get('text', '')}")
+            # print(f"对话框内容: {dialog_info.get('text', '')}")
             
             # 获取确认按钮或对话框中心点信息
             confirm_button = dialog_info.get('confirmButton')
@@ -1808,7 +1809,7 @@ def check_dialog(page, recursion_depth=0):
                 try:
                     print(f"未找到确认按钮，尝试点击对话框中心: x={dialog_info.get('x')}, y={dialog_info.get('y')}")
                     page.mouse.click(dialog_info.get('x'), dialog_info.get('y'))
-                    print("✅ 点击对话框中心完成")
+                    # print("✅ 点击对话框中心完成")
                     time.sleep(2)
                     return True
                 except Exception as e:
@@ -1837,7 +1838,12 @@ def run_check_in_for_account(account_name, headless=False):
         try:
             # 启动浏览器
             browser = p.chromium.launch(headless=headless)
-            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            context = browser.new_context()
+            page = context.new_page()
+            
+            # 设置窗口大小
+            if not headless:
+                page.set_viewport_size({"width": 2560, "height": 1440})
             
             # 加载保存的状态
             try:
@@ -1926,79 +1932,70 @@ def run_check_in_for_account(account_name, headless=False):
     return False
 
 def run_share_video_for_account(account_name, headless=False):
-    """为单个账号执行视频分享"""
-    print(f"\n🔄 正在为账号 '{account_name}' 执行视频分享...")
-    browser_args = []
+    """为指定账号执行分享视频操作"""
+    print(f"\n===== 开始为账号 '{account_name}' 执行分享视频 =====")
+    data_dir = 'account_data'
     
-    # 添加一个函数内的本地函数，用于实际尝试进行分享
+    # 检查账号状态文件是否存在
+    state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+    if not os.path.exists(state_file):
+        print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
+        return False
+    
     def try_share_with_mode(use_headless):
-        try:
-            with sync_playwright() as p:
-                browser_type = p.chromium
+        with sync_playwright() as p:
+            try:
+                # 启动浏览器
+                browser = p.chromium.launch(headless=use_headless)
+                context = browser.new_context()
+                page = context.new_page()
+                
+                # 设置窗口大小
+                if not use_headless:
+                    page.set_viewport_size({"width": 2560, "height": 1440})
+                
+                # 加载保存的状态
                 try:
-                    browser = browser_type.launch(headless=use_headless, args=browser_args)
-                    mode_text = "无头" if use_headless else "可见"
-                    print(f"✅ 已启动{mode_text}浏览器")
+                    load_storage_state(context, state_file)
+                    print(f"✅ 已加载账号 '{account_name}' 的登录状态")
                 except Exception as e:
-                    print(f"❌ 启动浏览器失败: {str(e)}")
-                    return False
-                    
-                try:
-                    context = browser.new_context()
-                    
-                    # 尝试加载已保存的登录状态
-                    data_dir = 'account_data'
-                    state_file = os.path.join(data_dir, f"{account_name}_storage.json")
-                    
-                    # 加载登录状态
-                    if not os.path.exists(state_file):
-                        print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
-                        share_account_details(account_name, "未找到登录状态文件")
-                        return False
-                    
-                    try:
-                        load_storage_state(context, state_file)
-                        print(f"✅ 已加载账号 '{account_name}' 的登录状态")
-                    except Exception as e:
-                        print(f"❌ 无法加载账号状态: {str(e)}")
-                        share_account_details(account_name, f"无法加载状态: {str(e)}")
-                        return False
-                    
-                    page = context.new_page()
-                    
-                    # 直接执行视频分享函数
-                    if share_video(page):
-                        print(f"✅ 账号 '{account_name}' 分享视频成功！")
-                        share_account_details(account_name, "分享视频成功")
-                        return True
-                    else:
-                        print(f"❌ 账号 '{account_name}' 分享视频失败")
-                        if use_headless:
-                            print("无头模式分享失败，可能需要使用有界面模式")
-                        share_account_details(account_name, "分享视频失败")
-                        return False
-                    
-                except Exception as e:
-                    print(f"❌ 分享视频过程中出错: {str(e)}")
-                    share_account_details(account_name, f"分享视频失败: {str(e)}")
-                    return False
-                finally:
+                    print(f"❌ 加载账号状态失败: {str(e)}")
                     browser.close()
-        except Exception as e:
-            print(f"❌ 运行分享视频过程发生意外错误: {str(e)}")
-            share_account_details(account_name, f"意外错误: {str(e)}")
-            return False
+                    return False
+                
+                # 打开页面
+                page.goto("https://www.yfsp.tv/")
+                page.wait_for_load_state("networkidle")
+                
+                # 检查登录状态
+                if not check_login_status(page):
+                    print(f"❌ 账号 '{account_name}' 未登录")
+                    browser.close()
+                    return False
+                
+                # 执行分享操作
+                success = share_video(page)
+                if success:
+                    print(f"✅ 账号 '{account_name}' 分享视频成功")
+                else:
+                    print(f"❌ 账号 '{account_name}' 分享视频失败")
+                
+                browser.close()
+                return success
+                
+            except Exception as e:
+                print(f"❌ 执行分享操作时出错: {str(e)}")
+                if 'browser' in locals():
+                    browser.close()
+                return False
     
-    # 如果用户指定了headless模式，先尝试使用headless模式
-    if headless:
-        print("尝试使用无头模式进行分享...")
-        if try_share_with_mode(True):
-            return True
-        else:
-            print("无头模式分享失败，切换到有界面模式尝试...")
+    # 尝试使用指定模式
+    success = try_share_with_mode(headless)
+    if not success and not headless:
+        print("\n⚠️ 可见模式失败，尝试无头模式...")
+        success = try_share_with_mode(True)
     
-    # 无头模式失败或用户指定了有界面模式，使用有界面模式
-    return try_share_with_mode(False)
+    return success
 
 def run_for_single_account(account_name, headless=False):
     """为单个账号执行所有操作（先分享视频再签到）"""
@@ -2029,12 +2026,43 @@ def add_account(account_name, email=None, password=None, headless=False):
         print("❌ 邮箱和密码不能为空")
         return False
 
-    print(f"\n➡️ 开始添加账号: {email}")
+    print(f"\n➡️ 开始添加账号: {account_name}")
+
+    # 保存账号信息
+    account_info = {
+        'account_name': account_name,
+        'email': email,
+        'password': password
+    }
+    account_file = os.path.join(data_dir, f"{account_name}_account.json")
+    with open(account_file, 'w', encoding='utf-8') as f:
+        json.dump(account_info, f, ensure_ascii=False, indent=2)
+    print(f"✅ 已保存账号信息到 {account_file}")
+
+    # 保存账号名称到列表
+    accounts_file = os.path.join(data_dir, "accounts.txt")
+    accounts = []
+    if os.path.exists(accounts_file):
+        with open(accounts_file, 'r', encoding='utf-8') as f:
+            accounts = [line.strip() for line in f if line.strip()]
+    
+    if account_name not in accounts:
+        accounts.append(account_name)
+        with open(accounts_file, 'w', encoding='utf-8') as f:
+            for acc in accounts:
+                f.write(f"{acc}\n")
+        print(f"✅ 已添加账号到列表: {account_name}")
+    else:
+        print(f"⚠️ 账号 {account_name} 已存在于列表中")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        ctx = browser.new_context(viewport={"width": 1280, "height": 800})
-        page = ctx.new_page()
+        context = browser.new_context()
+        page = context.new_page()
+        
+        # 设置窗口大小
+        if not headless:
+            page.set_viewport_size({"width": 2560, "height": 1440})
 
         # 打开页面并点击 "登录"
         page.goto("https://www.yfsp.tv/list/anime", timeout=30000)
@@ -2078,7 +2106,7 @@ def add_account(account_name, email=None, password=None, headless=False):
                 )
                 print('✅ 已成功切换到 "其他方式登录"')
                 break
-            except PlaywrightTimeout:
+            except PlaywrightTimeoutError:
                 print("⚠️ 本次点击未生效，1s 后重试…")
                 time.sleep(1)
         else:
@@ -2109,7 +2137,7 @@ def add_account(account_name, email=None, password=None, headless=False):
                     if login_frame.locator('.slide-to-unlock-handle.fail').count() > 0:
                         print("❌ 滑动验证失败，重试中...")
                         time.sleep(1)
-                    continue
+                        continue
                     time.sleep(1)
                 
                 if login_frame.locator('.slide-to-unlock-handle.success').count() == 0:
@@ -2122,7 +2150,7 @@ def add_account(account_name, email=None, password=None, headless=False):
                         continue
                     else:
                         print("❌ 已达到最大重试次数，请手动重试")
-                        raise PlaywrightTimeout("验证未通过")
+                        raise PlaywrightTimeoutError("验证未通过")
                 
                 # 等待登录按钮变为可用状态
                 print("⏳ 等待登录按钮变为可用状态...")
@@ -2155,27 +2183,9 @@ def add_account(account_name, email=None, password=None, headless=False):
                     time.sleep(2)  # 额外等待以确保所有状态都已保存
                     
                     # 保存登录状态
-                    state_file = os.path.join(data_dir, f"{email}_storage.json")
-                    save_storage_state(ctx, state_file)
+                    state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                    save_storage_state(context, state_file)
                     print(f"✅ 已保存登录状态到 {state_file}")
-                    
-                    # 保存账号列表
-                    accounts_file = os.path.join(data_dir, "accounts.txt")
-                    accounts = []
-                    
-                    # 读取现有账号列表
-                    if os.path.exists(accounts_file):
-                        with open(accounts_file, 'r', encoding='utf-8') as f:
-                            accounts = [line.strip() for line in f if line.strip()]
-                    
-                    # 如果账号不在列表中，添加它
-                    if email not in accounts:
-                        accounts.append(email)
-                        with open(accounts_file, 'w', encoding='utf-8') as f:
-                            for acc in accounts:
-                                f.write(f"{acc}\n")
-                    
-                    print(f"✅ 账号 '{email}' 已添加到账号列表")
                     
                     # 如果不是无头模式，等待用户确认
                     if not headless:
@@ -2185,32 +2195,14 @@ def add_account(account_name, email=None, password=None, headless=False):
                     # 如果成功登录，跳出重试循环
                     return True
                     
-                except PlaywrightTimeout:
+                except PlaywrightTimeoutError:
                     if page.locator('text=退出登录').count() > 0:
                         print("✅ 登录完成（通过检查退出按钮确认）")
                         
                         # 保存登录状态
-                        state_file = os.path.join(data_dir, f"{email}_storage.json")
-                        save_storage_state(ctx, state_file)
+                        state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                        save_storage_state(context, state_file)
                         print(f"✅ 已保存登录状态到 {state_file}")
-                        
-                        # 保存账号列表
-                        accounts_file = os.path.join(data_dir, "accounts.txt")
-                        accounts = []
-                        
-                        # 读取现有账号列表
-                        if os.path.exists(accounts_file):
-                            with open(accounts_file, 'r', encoding='utf-8') as f:
-                                accounts = [line.strip() for line in f if line.strip()]
-                        
-                        # 如果账号不在列表中，添加它
-                        if email not in accounts:
-                            accounts.append(email)
-                            with open(accounts_file, 'w', encoding='utf-8') as f:
-                                for acc in accounts:
-                                    f.write(f"{acc}\n")
-                        
-                        print(f"✅ 账号 '{email}' 已添加到账号列表")
                         
                         # 如果不是无头模式，等待用户确认
                         if not headless:
@@ -2222,7 +2214,7 @@ def add_account(account_name, email=None, password=None, headless=False):
                         print("⚠️ 登录状态不确定，请检查页面")
                         raise
                 
-            except PlaywrightTimeout as e:
+            except PlaywrightTimeoutError as e:
                 print("❌ 操作超时，请检查页面状态")
                 verify_retry_count += 1
                 if verify_retry_count < max_verify_retries:
@@ -2346,7 +2338,7 @@ def slide_verify(login_frame):
         login_frame.wait_for_selector('.verify-success', timeout=5000)
         print("✅ 滑动验证通过")
         return True
-    except PlaywrightTimeout:
+    except PlaywrightTimeoutError:
         print("❌ 滑动验证未通过")
         return False
     
@@ -2396,6 +2388,11 @@ def auto_operations(operation_type='all', headless=True):
             success_count += 1
     
     print(f"\n✅ 操作完成: {success_count}/{len(accounts)} 个账号成功")
+    
+    # 执行完操作后，获取所有账号的金币数量
+    print("\n🔄 正在获取所有账号的金币数量...")
+    get_coins_for_all_accounts(headless=headless)
+    
     return success_count > 0
 
 def show_help():
@@ -2524,53 +2521,131 @@ def get_account_coins(account_name, headless=True):
         print(f"❌ 运行获取金币过程发生意外错误: {str(e)}")
         return None
 
-def get_coins_for_all_accounts(headless=True, return_text=False):
+def get_coins_for_all_accounts(headless=True):
     """获取所有账号的金币数量"""
-    print("🔄 正在获取所有账号的金币数量...")
     data_dir = 'account_data'
-    results = []
-    
     if not os.path.exists(data_dir):
-        print(f"❌ 账号数据目录 '{data_dir}' 不存在")
-        return results
-        
-    for item in os.listdir(data_dir):
-        if item.startswith('.') or item == 'shared':
-            continue
-            
-        if item.endswith('_storage.json'):
-            account_name = item.replace('_storage.json', '')
-            
-            # 获取该账号的金币
-            coins = get_account_coins(account_name, headless)
-            results.append({
-                'account': account_name,
-                'coins': coins
-            })
-    
-    # 显示结果摘要
-    print("\n📊 所有账号金币统计:")
-    result_lines = []
-    for item in results:
-        account = item['account']
-        coins = item['coins'] if item['coins'] is not None else "未获取"
-        line = f"👤 {account}: 🪙 {coins}"
-        print(f"  {line}")
-        result_lines.append(line)
-    if return_text:
-        return "\n".join(result_lines)
-    return results
+        print("❌ 账号数据目录不存在")
+        return
 
-def delete_account(email):
+    accounts = []
+    accounts_file = os.path.join(data_dir, "accounts.txt")
+    if os.path.exists(accounts_file):
+        with open(accounts_file, 'r', encoding='utf-8') as f:
+            accounts = [line.strip() for line in f if line.strip()]
+
+    if not accounts:
+        print("❌ 没有找到任何账号")
+        return
+
+    results = {}
+    failed_accounts = []
+
+    for account_name in accounts:
+        try:
+            coins = get_account_coins(account_name, headless=headless)
+            if coins is not None:
+                results[account_name] = coins
+                print(f"✅ {account_name}: {coins} 金币")
+            else:
+                failed_accounts.append(account_name)
+                print(f"❌ {account_name}: 获取金币失败")
+        except Exception as e:
+            failed_accounts.append(account_name)
+            print(f"❌ {account_name}: 发生错误 - {str(e)}")
+
+    # 保存最初失败的账号列表，用于后续比较
+    initially_failed_accounts = failed_accounts.copy()
+    final_failed_accounts = []
+
+    # 如果有失败的账号，尝试重新登录
+    if failed_accounts:
+        print("\n🔄 开始重新登录失败的账号...")
+        for account_name in failed_accounts:
+            try:
+                # 读取账号信息
+                account_file = os.path.join(data_dir, f"{account_name}_account.json")
+                if not os.path.exists(account_file):
+                    print(f"❌ {account_name}: 找不到账号信息文件")
+                    final_failed_accounts.append(account_name)
+                    continue
+
+                with open(account_file, 'r', encoding='utf-8') as f:
+                    account_info = json.load(f)
+                    email = account_info.get('email')
+                    password = account_info.get('password')
+
+                if not email or not password:
+                    print(f"❌ {account_name}: 账号信息不完整")
+                    final_failed_accounts.append(account_name)
+                    continue
+
+                print(f"\n➡️ 重新登录账号: {account_name}")
+                
+                # 删除账号
+                if delete_account(account_name):
+                    print(f"✅ 已删除账号 {account_name}")
+                    
+                    # 重新添加账号
+                    if add_account(account_name, email, password, headless=headless):
+                        print(f"✅ 已重新添加账号 {account_name}")
+                        
+                        # 重新获取金币
+                        coins = get_account_coins(account_name, headless=headless)
+                        if coins is not None:
+                            results[account_name] = coins
+                            print(f"✅ {account_name}: {coins} 金币")
+                        else:
+                            print(f"❌ {account_name}: 重新登录后仍无法获取金币")
+                            final_failed_accounts.append(account_name)
+                    else:
+                        print(f"❌ {account_name}: 重新添加失败")
+                        final_failed_accounts.append(account_name)
+                else:
+                    print(f"❌ {account_name}: 删除失败")
+                    final_failed_accounts.append(account_name)
+
+            except Exception as e:
+                print(f"❌ {account_name}: 重新登录时发生错误 - {str(e)}")
+                final_failed_accounts.append(account_name)
+
+    # 发送邮件通知
+    if results or final_failed_accounts:
+        total_coins = sum(results.values())
+        
+        # 构建主题
+        subject = "爱壹帆金币统计"
+        if final_failed_accounts:
+            subject += f"({len(final_failed_accounts)}个失败)"
+        
+        # 构建内容
+        content = f"""{datetime.now().strftime('%Y-%m-%d')}
+总金币: {total_coins}
+
+账号统计:
+"""
+        
+        # 添加所有账号，包括成功和失败的
+        all_accounts = sorted(list(set(list(results.keys()) + final_failed_accounts)))
+        for account in all_accounts:
+            if account in results:
+                content += f"✅ {account}: {results[account]}枚\n"
+            else:
+                content += f"❌ {account}: 获取失败\n"
+        
+        send_email(subject, content)
+        print("\n✅ 已发送邮件通知")
+
+def delete_account(account_name):
     """删除指定账号
     
     Args:
-        email: 要删除的账号邮箱
+        account_name: 要删除的账号名称
     """
     data_dir = 'account_data'
     
-    if not email:
-        print("❌ 请提供要删除的账号邮箱")
+    if not account_name:
+        print("❌ 请提供要删除的账号名称")
         return False
         
     # 检查账号是否存在
@@ -2584,24 +2659,30 @@ def delete_account(email):
     with open(accounts_file, 'r', encoding='utf-8') as f:
         accounts = [line.strip() for line in f if line.strip()]
         
-    if email not in accounts:
-        print(f"❌ 账号 {email} 不存在")
+    if account_name not in accounts:
+        print(f"❌ 账号 {account_name} 不存在")
         return False
         
     try:
         # 删除存储文件
-        state_file = os.path.join(data_dir, f"{email}_storage.json")
+        state_file = os.path.join(data_dir, f"{account_name}_storage.json")
         if os.path.exists(state_file):
             os.remove(state_file)
             print(f"✅ 已删除账号存储文件: {state_file}")
             
+        # 删除账号信息文件
+        account_file = os.path.join(data_dir, f"{account_name}_account.json")
+        if os.path.exists(account_file):
+            os.remove(account_file)
+            print(f"✅ 已删除账号信息文件: {account_file}")
+            
         # 从账号列表中移除
-        accounts.remove(email)
+        accounts.remove(account_name)
         with open(accounts_file, 'w', encoding='utf-8') as f:
             for acc in accounts:
                 f.write(f"{acc}\n")
                 
-        print(f"✅ 已从账号列表中移除: {email}")
+        print(f"✅ 已从账号列表中移除: {account_name}")
         return True
         
     except Exception as e:
@@ -2609,17 +2690,43 @@ def delete_account(email):
         return False
 
 def send_email(subject, content):
-    msg = MIMEText(content, 'plain', 'utf-8')
-    msg['From'] = EMAIL_USER
-    msg['To'] = EMAIL_TO
-    msg['Subject'] = Header(subject, 'utf-8')
+    """发送邮件通知"""
     try:
-        with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT) as server:
+        # 创建邮件内容
+        msg = MIMEText(content, 'plain', 'utf-8')
+        msg['From'] = EMAIL_USER
+        msg['To'] = EMAIL_TO
+        msg['Subject'] = Header(subject, 'utf-8')
+        
+        # 记录邮件发送尝试
+        logging.info(f"尝试发送邮件: 从 {EMAIL_USER} 到 {EMAIL_TO}")
+        logging.info(f"邮件主题: {subject}")
+        
+        # 创建 SSL 上下文，禁用证书验证
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        
+        # 尝试发送邮件
+        with smtplib.SMTP_SSL(EMAIL_HOST, EMAIL_PORT, context=context) as server:
+            logging.info("已连接到 SMTP 服务器")
             server.login(EMAIL_USER, EMAIL_PASS)
+            logging.info("登录成功")
             server.sendmail(EMAIL_USER, [EMAIL_TO], msg.as_string())
+            logging.info("邮件发送成功")
         print("✅ 邮件发送成功")
+    except smtplib.SMTPAuthenticationError as e:
+        logging.error(f"SMTP 认证失败: {str(e)}")
+        print(f"❌ 邮件发送失败: SMTP 认证失败 - {str(e)}")
+    except smtplib.SMTPException as e:
+        logging.error(f"SMTP 错误: {str(e)}")
+        print(f"❌ 邮件发送失败: SMTP 错误 - {str(e)}")
     except Exception as e:
-        print(f"❌ 邮件发送失败: {e}")
+        logging.error(f"邮件发送失败: {str(e)}")
+        print(f"❌ 邮件发送失败: {str(e)}")
+        # 打印完整的错误信息
+        import traceback
+        logging.error(traceback.format_exc())
 
 def main():
     """主函数，处理命令行参数"""
@@ -2646,29 +2753,35 @@ def main():
         email = None
         password = None
         
+        # 第一个非选项参数应该是 command 后面的账号名称
+        if len(sys.argv) > 2 and not sys.argv[2].startswith('--'):
+            account_name = sys.argv[2]
+        
+        # 然后解析选项参数
         for i in range(2, len(sys.argv)):
             if sys.argv[i] == '--eml' and i + 1 < len(sys.argv):
                 email = sys.argv[i + 1]
             elif sys.argv[i] == '--pwd' and i + 1 < len(sys.argv):
                 password = sys.argv[i + 1]
-            elif not sys.argv[i].startswith('--'):
-                account_name = sys.argv[i]
         
         if not account_name or not email or not password:
             print("❌ 缺少必要的参数")
             print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码> [--visible]")
             return
+        
+        # 添加调试信息
+        print(f"DEBUG: 解析参数 - 账号名称: {account_name}, 邮箱: {email}, 密码: {password}")
             
         add_account(account_name, email, password, headless=headless)
     
     elif command == 'delete':
         if len(sys.argv) < 3:
-            print("❌ 请提供要删除的账号邮箱")
-            print("用法: python main.py delete <邮箱>")
+            print("❌ 请提供要删除的账号名称")
+            print("用法: python main.py delete <账号名称>")
             return
             
-        email = sys.argv[2]
-        delete_account(email)
+        account_name = sys.argv[2]
+        delete_account(account_name)
     
     elif command == 'run':
         auto_operations('all', headless=headless)
@@ -2688,18 +2801,10 @@ def main():
     elif command in ['help', '-h', '--help']:
         show_help()
     
-    elif command == 'weekly_report':
-        # 判断是否为周五
-        if datetime.datetime.now().weekday() == 4:  # 0=周一, 4=周五
-            content = get_coins_for_all_accounts(headless=headless, return_text=True)
-            send_email("每周账号金币统计", content)
-        else:
-            print("今天不是周五，不发送邮件。")
-    
     else:
         print(f"❌ 未知命令: {command}")
         show_help()
 
 if __name__ == "__main__":
     main()
-    print("sys.argv:", sys.argv)
+    # print("sys.argv:", sys.argv)
