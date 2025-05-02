@@ -72,12 +72,8 @@ python main.py share [--visible]
 python main.py coins [--visible]
 ```
 
-### 每周五推送金币统计到邮箱（需配置邮箱参数）
+### 自动推送金币统计到邮箱（需配置邮箱参数）
 
-```bash
-python main.py weekly_report
-```
-> 建议配合云平台定时任务，每周五自动触发。
 
 ### 查看帮助
 
@@ -88,8 +84,7 @@ python main.py help
 ## 定时任务/云端部署建议
 
 - 推荐使用 Docker 部署，详见 Dockerfile 示例。
-- 云端部署建议设置最大实例数为 1，CPU 0.25 vCPU，内存 1GB。
-- 可用 ClawCloud/Cloud Run 等平台的定时任务功能，每天/每周自动运行。
+- 最好配合住宅IP,防止人机验证
 
 ## 数据与安全
 

@@ -24,11 +24,11 @@ logging.basicConfig(
 )
 
 # 邮件配置参数（本地固定值）
-EMAIL_HOST = "smtp.qq.com"  # SMTP服务器地址
+EMAIL_HOST = "smtp.xx.com"  # SMTP服务器地址
 EMAIL_PORT = 465  # SMTP端口（SSL通常是465）
-EMAIL_USER = "358856615@qq.com"  # 发件人邮箱
-EMAIL_PASS = "jgbcljraqmalcage"  # 邮箱授权码或密码
-EMAIL_TO = "soyoungto686@gmail.com"  # 收件人邮箱
+EMAIL_USER = "your_email"  # 发件人邮箱
+EMAIL_PASS = "your_auth_code"  # 邮箱授权码或密码
+EMAIL_TO = "your_email"  # 收件人邮箱
 
 def check_login_status(page):
     """检查是否已登录"""
