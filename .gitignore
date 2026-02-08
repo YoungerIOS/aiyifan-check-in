@@ -1,2 +1,3 @@
 account_data/
 *.log
+.DS_Store

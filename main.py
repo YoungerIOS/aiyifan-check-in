@@ -2007,8 +2007,163 @@ def run_for_single_account(account_name, headless=False):
     return share_result and check_in_result
 
 
+def manual_login(account_name):
+    """手动登录账号（打开可见浏览器，用户手动完成登录和人机验证）
+    
+    Args:
+        account_name: 账号名称
+    """
+    data_dir = 'account_data'
+    os.makedirs(data_dir, exist_ok=True)
+    
+    if not account_name or not account_name.strip():
+        print("❌ 账号名称不能为空")
+        return False
+    
+    print(f"\n🔐 开始手动登录账号: {account_name}")
+    print("=" * 50)
+    print("⚠️  注意事项:")
+    print("   1. 浏览器将打开登录页面")
+    print("   2. 请手动完成登录（包括人机验证）")
+    print("   3. 登录成功后，请按回车键保存登录状态")
+    print("=" * 50)
+    
+    browser = None
+    try:
+        with sync_playwright() as p:
+            print("\n正在启动浏览器...")
+            
+            # 使用系统 Chrome 浏览器（而非 Playwright 自带的 Chromium）
+            # 这样可以避免被网站检测为自动化工具
+            try:
+                browser = p.chromium.launch(
+                    headless=False,
+                    channel="chrome",  # 使用系统 Chrome
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                    ]
+                )
+                print("✅ 已启动系统 Chrome 浏览器")
+            except Exception as chrome_error:
+                print(f"⚠️ 无法启动系统 Chrome: {str(chrome_error)}")
+                print("   正在尝试使用 Chromium...")
+                browser = p.chromium.launch(
+                    headless=False,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox',
+                        '--disable-dev-shm-usage'
+                    ]
+                )
+            
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                # 不设置 user_agent，使用浏览器默认值
+            )
+            page = context.new_page()
+            
+            # 导航到网站 - 使用更宽松的等待策略
+            print("正在打开网站（可能需要较长时间）...")
+            try:
+                # 使用 wait_until="commit" 避免等待完整加载
+                page.goto("https://www.yfsp.tv", timeout=60000, wait_until="commit")
+                print("✅ 页面已开始加载")
+            except Exception as nav_error:
+                print(f"⚠️ 页面加载遇到问题: {str(nav_error)}")
+                print("   浏览器已打开，你可以手动在地址栏输入网址")
+            
+            # 尝试等待页面加载，但不强制要求
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except:
+                pass  # 忽略超时，让用户继续操作
+            
+            # 设置页面缩放为 90%，确保所有元素（如头像）可见
+            try:
+                page.evaluate("document.body.style.zoom = '0.9'")
+                print("✅ 已设置页面缩放为 90%")
+            except:
+                pass
+            
+            print("\n" + "=" * 50)
+            print("🌐 浏览器已打开，请手动完成以下步骤:")
+            print("   1. 如页面未加载，请手动刷新或输入网址: https://www.yfsp.tv")
+            print("   2. 点击「登录」按钮")
+            print("   3. 输入账号密码")
+            print("   4. 完成人机验证")
+            print("   5. 确认登录成功（能看到个人头像）")
+            print("=" * 50)
+            
+            # 等待用户手动登录
+            input("\n✅ 登录成功后，请按回车键保存登录状态...")
+            
+            # 检查页面是否还存在
+            try:
+                _ = page.url  # 测试页面是否还活着
+            except:
+                print("❌ 浏览器已关闭，无法保存状态")
+                return False
+            
+            # 检查登录状态
+            try:
+                is_logged_in = check_login_status(page)
+            except:
+                # 如果检查失败，假设用户已确认登录成功
+                print("⚠️ 无法自动检测登录状态，假设用户已确认登录成功")
+                is_logged_in = True
+            
+            if is_logged_in:
+                # 保存账号到列表
+                accounts_file = os.path.join(data_dir, "accounts.txt")
+                accounts = []
+                if os.path.exists(accounts_file):
+                    with open(accounts_file, 'r', encoding='utf-8') as f:
+                        accounts = [line.strip() for line in f if line.strip()]
+                
+                if account_name not in accounts:
+                    accounts.append(account_name)
+                    with open(accounts_file, 'w', encoding='utf-8') as f:
+                        for acc in accounts:
+                            f.write(f"{acc}\n")
+                    print(f"✅ 已添加账号到列表: {account_name}")
+                
+                # 保存登录状态
+                state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+                save_storage_state(context, state_file)
+                print(f"✅ 已保存登录状态到 {state_file}")
+                
+                # 获取并显示用户名
+                try:
+                    username = get_username(page)
+                    print(f"✅ 登录用户: {username}")
+                except:
+                    print("✅ 登录状态已保存")
+                
+                browser.close()
+                print("\n🎉 手动登录完成！现在可以使用以下命令执行自动操作:")
+                print("   python main.py run        # 签到+分享")
+                print("   python main.py checkin    # 仅签到")
+                print("   python main.py share      # 仅分享")
+                return True
+            else:
+                print("❌ 未检测到登录成功，请确保已正确登录")
+                print("   如需重试，请重新执行: python main.py login <账号名>")
+                browser.close()
+                return False
+                
+    except Exception as e:
+        print(f"❌ 手动登录过程中出错: {str(e)}")
+        traceback.print_exc()
+        if browser:
+            try:
+                browser.close()
+            except:
+                pass
+        return False
+
+
 def add_account(account_name, email=None, password=None, headless=False):
-    """添加新账号
+    """添加新账号（保存账号信息，建议使用 login 命令手动登录）
     
     Args:
         account_name: 账号名称
@@ -2399,16 +2554,20 @@ def auto_operations(operation_type='all', headless=True):
 def show_help():
     """显示帮助信息"""
     print("\n📋 可用命令:")
-    print("  python main.py add <账号名称>  - 添加新账号")
-    print("  python main.py run            - 为所有账号执行签到和分享操作")
-    print("  python main.py checkin        - 仅执行签到操作")
-    print("  python main.py share          - 仅执行分享操作")
-    print("  python main.py coins          - 获取所有账号的金币数量")
-    print("  python main.py list           - 显示所有已保存的账号")
-    print("  python main.py help           - 显示此帮助信息")
+    print("  python main.py login <账号名>   - 🔐 手动登录（推荐，可绕过人机验证）")
+    print("  python main.py add <账号名>     - 添加账号（需自动登录，可能遇到验证码）")
+    print("  python main.py run              - 为所有账号执行签到和分享操作")
+    print("  python main.py checkin          - 仅执行签到操作")
+    print("  python main.py share            - 仅执行分享操作")
+    print("  python main.py coins            - 获取所有账号的金币数量")
+    print("  python main.py list             - 显示所有已保存的账号")
+    print("  python main.py delete <账号名>  - 删除指定账号")
+    print("  python main.py help             - 显示此帮助信息")
     print("\n选项:")
-    print("  --visible                     - 使用可见浏览器（默认为隐藏模式运行）")
-    print("备注: 分享操作现支持无头模式，但在失败时会自动尝试使用有界面模式")
+    print("  --visible                       - 使用可见浏览器（默认为隐藏模式运行）")
+    print("\n💡 推荐用法:")
+    print("  1. 先使用 login 命令手动登录账号（可手动完成人机验证）")
+    print("  2. 然后使用 run/checkin/share 执行自动操作")
 
 def list_accounts():
     """列出所有已保存的账号"""
@@ -2555,63 +2714,30 @@ def get_coins_for_all_accounts(headless=True):
             failed_accounts.append(account_name)
             print(f"❌ {account_name}: 发生错误 - {str(e)}")
 
-    # 保存最初失败的账号列表，用于后续比较
-    initially_failed_accounts = failed_accounts.copy()
-    final_failed_accounts = []
+    # 保存最初失败的账号列表
+    final_failed_accounts = failed_accounts.copy()
 
-    # 如果有失败的账号，尝试重新登录
+    # 如果有失败的账号，提示用户手动登录（不再尝试自动登录）
     if failed_accounts:
-        print("\n🔄 开始重新登录失败的账号...")
+        print("\n" + "=" * 50)
+        print("⚠️  以下账号需要手动登录（登录状态已过期或不存在）:")
         for account_name in failed_accounts:
-            try:
-                # 读取账号信息
-                account_file = os.path.join(data_dir, f"{account_name}_account.json")
-                if not os.path.exists(account_file):
-                    print(f"❌ {account_name}: 找不到账号信息文件")
-                    final_failed_accounts.append(account_name)
-                    continue
+            print(f"   - {account_name}")
+        print("\n💡 请使用以下命令手动登录:")
+        for account_name in failed_accounts:
+            print(f"   python main.py login {account_name}")
+        print("=" * 50)
 
-                with open(account_file, 'r', encoding='utf-8') as f:
-                    account_info = json.load(f)
-                    email = account_info.get('email')
-                    password = account_info.get('password')
-
-                if not email or not password:
-                    print(f"❌ {account_name}: 账号信息不完整")
-                    final_failed_accounts.append(account_name)
-                    continue
-
-                print(f"\n➡️ 重新登录账号: {account_name}")
-                
-                # 删除账号
-                if delete_account(account_name):
-                    print(f"✅ 已删除账号 {account_name}")
-                    
-                    # 重新添加账号
-                    if add_account(account_name, email, password, headless=headless):
-                        print(f"✅ 已重新添加账号 {account_name}")
-                        
-                        # 重新获取金币
-                        coins = get_account_coins(account_name, headless=headless)
-                        if coins is not None:
-                            results[account_name] = coins
-                            print(f"✅ {account_name}: {coins} 金币")
-                        else:
-                            print(f"❌ {account_name}: 重新登录后仍无法获取金币")
-                            final_failed_accounts.append(account_name)
-                    else:
-                        print(f"❌ {account_name}: 重新添加失败")
-                        final_failed_accounts.append(account_name)
-                else:
-                    print(f"❌ {account_name}: 删除失败")
-                    final_failed_accounts.append(account_name)
-
-            except Exception as e:
-                print(f"❌ {account_name}: 重新登录时发生错误 - {str(e)}")
-                final_failed_accounts.append(account_name)
-
-    # 发送邮件通知
-    if results or final_failed_accounts:
+    # 打印汇总结果
+    if results:
+        print("\n📊 金币统计汇总:")
+        total_coins = sum(results.values())
+        for account_name, coins in results.items():
+            print(f"   ✅ {account_name}: {coins} 金币")
+        print(f"   💰 总计: {total_coins} 金币")
+    
+    # 只有在成功获取到结果时才发送邮件（且邮箱配置正确）
+    if results and EMAIL_HOST != "smtp.xx.com":
         total_coins = sum(results.values())
         
         # 构建主题
@@ -2626,13 +2752,13 @@ def get_coins_for_all_accounts(headless=True):
 账号统计:
 """
         
-        # 添加所有账号，包括成功和失败的
+        # 添加所有账号
         all_accounts = sorted(list(set(list(results.keys()) + final_failed_accounts)))
         for account in all_accounts:
             if account in results:
                 content += f"✅ {account}: {results[account]}枚\n"
             else:
-                content += f"❌ {account}: 获取失败\n"
+                content += f"❌ {account}: 需要手动登录\n"
         
         send_email(subject, content)
         print("\n✅ 已发送邮件通知")
@@ -2798,6 +2924,15 @@ def main():
     
     elif command == 'list':
         list_accounts()
+    
+    elif command == 'login':
+        if len(sys.argv) < 3:
+            print("❌ 请提供账号名称")
+            print("用法: python main.py login <账号名>")
+            return
+        
+        account_name = sys.argv[2]
+        manual_login(account_name)
     
     elif command in ['help', '-h', '--help']:
         show_help()
