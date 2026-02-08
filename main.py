@@ -1266,6 +1266,39 @@ def share_account_details(account_name, status):
         f.write(line)
 
 
+def check_today_status(account_name, operation_type):
+    """检查账号今日是否已完成指定操作
+    
+    Args:
+        account_name: 账号名称
+        operation_type: 操作类型 ('签到' 或 '分享')
+    
+    Returns:
+        bool: True 如果今日已成功完成该操作
+    """
+    data_dir = 'account_data'
+    shared_dir = os.path.join(data_dir, 'shared')
+    
+    # 获取今日状态文件
+    today = datetime.now().strftime('%Y-%m-%d')
+    status_file = os.path.join(shared_dir, f"{today}_status.txt")
+    
+    if not os.path.exists(status_file):
+        return False
+    
+    # 读取状态文件，检查是否有成功记录
+    try:
+        with open(status_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                # 格式: "HH:MM:SS - account_name: 签到成功" 或 "HH:MM:SS - account_name: 分享成功"
+                if f"- {account_name}: {operation_type}成功" in line:
+                    return True
+    except Exception:
+        pass
+    
+    return False
+
+
 def force_click_sign_in_button(page):
     """使用多种方法点击签到按钮"""
     try:
@@ -1829,6 +1862,11 @@ def run_check_in_for_account(account_name, headless=False):
     print(f"\n===== 开始为账号 '{account_name}' 执行签到 =====")
     data_dir = 'account_data'
     
+    # 检查今日是否已签到成功
+    if check_today_status(account_name, '签到'):
+        print(f"⏭️ 账号 '{account_name}' 今日已签到成功，跳过")
+        return True  # 返回 True 表示无需再次操作
+    
     # 检查账号状态文件是否存在
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
@@ -1937,6 +1975,11 @@ def run_share_video_for_account(account_name, headless=False):
     print(f"\n===== 开始为账号 '{account_name}' 执行分享视频 =====")
     data_dir = 'account_data'
     
+    # 检查今日是否已分享成功
+    if check_today_status(account_name, '分享'):
+        print(f"⏭️ 账号 '{account_name}' 今日已分享成功，跳过")
+        return True  # 返回 True 表示无需再次操作
+    
     # 检查账号状态文件是否存在
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
@@ -1978,6 +2021,8 @@ def run_share_video_for_account(account_name, headless=False):
                 success = share_video(page)
                 if success:
                     print(f"✅ 账号 '{account_name}' 分享视频成功")
+                    # 记录分享成功状态
+                    share_account_details(account_name, "分享成功")
                 else:
                     print(f"❌ 账号 '{account_name}' 分享视频失败")
                 
@@ -2535,10 +2580,10 @@ def auto_operations(operation_type='all', headless=True):
             # 将headless参数传递给分享函数，允许尝试无头模式
             success = run_share_video_for_account(account_name, headless=headless)
         else:  # 'all'
-            # 执行所有操作
+            # 执行所有操作，必须签到和分享都成功才算成功
             check_in_success = run_check_in_for_account(account_name, headless=headless)
             share_success = run_share_video_for_account(account_name, headless=headless)
-            success = check_in_success or share_success
+            success = check_in_success and share_success
             
         if success:
             success_count += 1
