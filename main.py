@@ -33,12 +33,42 @@ logging.basicConfig(
 
 # 不再在模块导入时向终端打印环境信息，保持脚本静默
 
-# 邮件配置参数（本地固定值）
-EMAIL_HOST = "smtp.qq.com"  # SMTP服务器地址
-EMAIL_PORT = 465  # SMTP端口（SSL通常是465）
-EMAIL_USER = ""  # 发件人邮箱
-EMAIL_PASS = ""  # 邮箱授权码或密码
-EMAIL_TO = ""  # 收件人邮箱
+# 邮件配置参数（默认占位，实际值从本地配置文件加载）
+EMAIL_HOST = None  # SMTP服务器地址
+EMAIL_PORT = None  # SMTP端口
+EMAIL_USER = None  # 发件人邮箱
+EMAIL_PASS = None  # 邮箱授权码或密码
+EMAIL_TO = None    # 收件人邮箱
+
+
+def load_email_config():
+    """
+    从本地的 JSON 配置文件加载邮箱配置。
+    """
+    global EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS, EMAIL_TO
+
+    try:
+        config_path = os.path.join(BASE_DIR, "account_data", "email_config.json")
+        if not os.path.exists(config_path):
+            logging.warning("email_config.json 不存在，邮件发送功能将被禁用")
+            return
+
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+
+        EMAIL_HOST = cfg.get("EMAIL_HOST", EMAIL_HOST)
+        EMAIL_PORT = cfg.get("EMAIL_PORT", EMAIL_PORT)
+        EMAIL_USER = cfg.get("EMAIL_USER", EMAIL_USER)
+        EMAIL_PASS = cfg.get("EMAIL_PASS", EMAIL_PASS)
+        EMAIL_TO = cfg.get("EMAIL_TO", EMAIL_TO)
+
+        logging.info("已从 email_config.json 加载邮件配置")
+    except Exception as e:
+        logging.error(f"加载 email_config.json 失败: {e}")
+
+
+# 启动时尝试加载一次邮件配置
+load_email_config()
 
 def check_login_status(page):
     """检查是否已登录"""
@@ -2891,6 +2921,11 @@ def delete_account(account_name):
 def send_email(subject, content):
     """发送邮件通知"""
     try:
+        # 如果邮件配置不完整，则静默跳过发送，避免因为本地未配置影响脚本其它功能
+        if not all([EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS, EMAIL_TO]):
+            logging.warning("邮件配置不完整，跳过发送邮件")
+            return
+
         # 创建邮件内容
         msg = MIMEText(content, 'plain', 'utf-8')
         msg['From'] = EMAIL_USER
