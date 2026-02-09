@@ -1,8 +1,8 @@
 name: Build and Push Docker Image
 
 on:
-  push:
-    branches: [ main ]   # 只在 main 分支 push 时触发
+  # push:
+  #   branches: [ main ]   # 只在 main 分支 push 时触发
 
 jobs:
   build:

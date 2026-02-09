@@ -4,7 +4,7 @@ import json
 import time
 import logging
 import ssl
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import random
 import smtplib
@@ -14,21 +14,31 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import traceback
 
 # 配置日志
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)
+LOG_PATH = os.path.join(BASE_DIR, "aiyifan.log")
+
+# 为避免在交互环境 / 多次导入时重复添加 handler，先清空根 logger 的已有 handler，
+# 再只添加文件 handler；这样不会向终端输出，也不会重复打印多次。
+root_logger = logging.getLogger()
+for _h in list(root_logger.handlers):
+    root_logger.removeHandler(_h)
+
+file_handler = logging.FileHandler(LOG_PATH)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('aiyifan.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[file_handler],
 )
 
+# 不再在模块导入时向终端打印环境信息，保持脚本静默
+
 # 邮件配置参数（本地固定值）
-EMAIL_HOST = "smtp.xx.com"  # SMTP服务器地址
+EMAIL_HOST = "smtp.qq.com"  # SMTP服务器地址
 EMAIL_PORT = 465  # SMTP端口（SSL通常是465）
-EMAIL_USER = "your_email"  # 发件人邮箱
-EMAIL_PASS = "your_auth_code"  # 邮箱授权码或密码
-EMAIL_TO = "your_email"  # 收件人邮箱
+EMAIL_USER = ""  # 发件人邮箱
+EMAIL_PASS = ""  # 邮箱授权码或密码
+EMAIL_TO = ""  # 收件人邮箱
 
 def check_login_status(page):
     """检查是否已登录"""
@@ -1267,7 +1277,7 @@ def share_account_details(account_name, status):
 
 
 def check_today_status(account_name, operation_type):
-    """检查账号今日是否已完成指定操作
+    """检查账号近 24 小时内是否已完成指定操作（避免按自然日重复操作）
     
     Args:
         account_name: 账号名称
@@ -1279,24 +1289,41 @@ def check_today_status(account_name, operation_type):
     data_dir = 'account_data'
     shared_dir = os.path.join(data_dir, 'shared')
     
-    # 获取今日状态文件
-    today = datetime.now().strftime('%Y-%m-%d')
-    status_file = os.path.join(shared_dir, f"{today}_status.txt")
-    
-    if not os.path.exists(status_file):
+    now = datetime.now()
+    cutoff = now - timedelta(hours=24)
+
+    last_success_time = None
+
+    # 只需要检查「今天」和「昨天」两个文件，就足以覆盖 24 小时窗口
+    for delta_days in (0, -1):
+        date = (now + timedelta(days=delta_days)).strftime('%Y-%m-%d')
+        status_file = os.path.join(shared_dir, f"{date}_status.txt")
+        if not os.path.exists(status_file):
+            continue
+
+        try:
+            with open(status_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    # 原始格式: "HH:MM:SS - account_name: 签到成功"
+                    if f"- {account_name}: {operation_type}成功" in line:
+                        try:
+                            time_part = line.split(" - ", 1)[0].strip()
+                            dt = datetime.strptime(f"{date} {time_part}", "%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            continue
+
+                        if last_success_time is None or dt > last_success_time:
+                            last_success_time = dt
+        except Exception:
+            # 读文件失败直接忽略，不影响其它文件
+            continue
+
+    if last_success_time is None:
+        # 从未成功过，或者超过两天没成功过
         return False
-    
-    # 读取状态文件，检查是否有成功记录
-    try:
-        with open(status_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                # 格式: "HH:MM:SS - account_name: 签到成功" 或 "HH:MM:SS - account_name: 分享成功"
-                if f"- {account_name}: {operation_type}成功" in line:
-                    return True
-    except Exception:
-        pass
-    
-    return False
+
+    # 在 24 小时窗口内视为“已完成”，否则认为可以重新操作
+    return last_success_time >= cutoff
 
 
 def force_click_sign_in_button(page):
