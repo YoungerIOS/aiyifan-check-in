@@ -1307,20 +1307,22 @@ def share_account_details(account_name, status):
 
 
 def check_today_status(account_name, operation_type):
-    """检查账号近 24 小时内是否已完成指定操作（避免按自然日重复操作）
+    """检查账号最近 23小时50分钟内 是否已完成指定操作
     
     Args:
         account_name: 账号名称
         operation_type: 操作类型 ('签到' 或 '分享')
     
     Returns:
-        bool: True 如果今日已成功完成该操作
+        bool: True 如果最近已成功完成该操作（需要跳过）
     """
     data_dir = 'account_data'
     shared_dir = os.path.join(data_dir, 'shared')
     
     now = datetime.now()
-    cutoff = now - timedelta(hours=24)
+    # 检查过去 23小时50分钟 内是否有记录
+    # 留 10 分钟余量是为了避免定时任务略微提前导致被跳过
+    cutoff = now - timedelta(hours=23, minutes=50)
 
     last_success_time = None
 
@@ -1352,8 +1354,8 @@ def check_today_status(account_name, operation_type):
         # 从未成功过，或者超过两天没成功过
         return False
 
-    # 在 24 小时窗口内视为“已完成”，否则认为可以重新操作
-    return last_success_time >= cutoff
+    # 在指定时间窗口内视为“已完成”，否则认为可以重新操作
+    return last_success_time > cutoff
 
 
 def force_click_sign_in_button(page):
