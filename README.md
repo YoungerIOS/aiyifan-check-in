@@ -29,24 +29,18 @@ playwright install chromium
 
 ## 使用方法
 
-### 添加新账号
-由于网站的自动登录校验（如滑动验证/风控）目前较难稳定通过，此方法可能会报错或无法完成登录。
+### 添加 / 保存账号邮箱与密码（仅写本地文件）
+
+`add` 把邮箱、密码合并写入 `account_data/account.json`
+
 ```bash
 python main.py add <账号名称> --eml <邮箱> --pwd <密码>
 ```
 
-更推荐的做法是使用手动登录并保存登录态：
+随后在浏览器里完成登录并保存状态（`login` 会从 `account.json` 读取凭据用于自动填表）：
 
 ```bash
 python main.py login <账号名称>
-```
-
-执行后会打开可见浏览器，你需要手动完成登录和人机验证；登录成功后按回车键保存登录状态。
-
-成功后可用以下命令确认账号已加入：
-
-```bash
-python main.py list
 ```
 
 ### 删除账号
@@ -102,7 +96,7 @@ python main.py help
 
 ## 数据与安全
 
-- 账号信息和状态保存在 `account_data` 目录下，请妥善保管。
+- 账号邮箱与密码保存在 `account_data/account.json`，登录态在 `*_storage.json`，账号列表在 `accounts.txt`，请妥善保管。
 - 邮箱推送需配置 SMTP 信息，建议使用专用邮箱。
 
 ## 故障排查

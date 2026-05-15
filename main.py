@@ -70,6 +70,30 @@ def load_email_config():
 # 启动时尝试加载一次邮件配置
 load_email_config()
 
+
+def _load_yfsp_login_entry_css():
+    """可选：account_data/yfsp_ui_config.json 中的 login_entry_css，站点改版时可强制指定登录入口。"""
+    path = os.path.join(BASE_DIR, "account_data", "yfsp_ui_config.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        sel = (cfg.get("login_entry_css") or "").strip()
+        return sel or None
+    except Exception as e:
+        logging.warning(f"读取 yfsp_ui_config.json 失败: {e}")
+        return None
+
+
+# 爱壹帆顶栏头像右侧「登录」文案节点（Chrome 复制；站方改版后可用 yfsp_ui_config.json / YFSP_LOGIN_ENTRY_CSS 覆盖）
+YFSP_BUILTIN_LOGIN_CSS_FALLBACKS = (
+    "body > div.root-container > div > div.top-nav.fixed > div > div > div.box.justify-content-end > div.user-block.d-flex.d-inline-flex > div > div > span",
+    "div.top-nav.fixed div.user-block.d-flex span",
+    "div.top-nav.fixed div.user-block span",
+)
+
+
 def check_login_status(page):
     """检查是否已登录"""
     try:
@@ -123,7 +147,11 @@ def check_login_status(page):
         return True
         
     except Exception as e:
-        print(f"❌ 检查登录状态时出错: {str(e)}")
+        msg = str(e).lower()
+        if "has been closed" in msg or ("closed" in msg and "target" in msg):
+            print("❌ 页面或浏览器已关闭，无法判断登录状态（请保持浏览器打开至按回车保存后再关）")
+        else:
+            print(f"❌ 检查登录状态时出错: {str(e)}")
         return False
 
 def get_username(page):
@@ -2111,25 +2139,394 @@ def run_for_single_account(account_name, headless=False):
     return share_result and check_in_result
 
 
+def load_account_credentials(account_name, data_dir):
+    """从 account_data/account.json 读取指定账号的邮箱与密码；若无则回退到旧的 <name>_account.json。"""
+    account_name = (account_name or "").strip()
+    if not account_name:
+        return None, None
+    db_path = os.path.join(data_dir, "account.json")
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            if isinstance(db, dict):
+                entry = db.get(account_name)
+                if isinstance(entry, dict):
+                    email = (entry.get("email") or "").strip()
+                    password = entry.get("password")
+                    if password is not None:
+                        password = str(password)
+                        if email and password:
+                            return email, password
+        except Exception as e:
+            logging.warning(f"读取 account.json 失败: {e}")
+    legacy = os.path.join(data_dir, f"{account_name}_account.json")
+    if not os.path.exists(legacy):
+        return None, None
+    try:
+        with open(legacy, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        email = (data.get("email") or "").strip()
+        password = data.get("password")
+        if password is None:
+            return None, None
+        password = str(password)
+        if not email or not password:
+            return None, None
+        return email, password
+    except Exception as e:
+        logging.warning(f"读取旧版账号文件失败: {e}")
+        return None, None
+
+
+def _yfsp_try_open_login_modal(page) -> bool:
+    """点击页面上未登录态的登录入口（右上头像+「登录」/ 立即登录 / 自定义选择器等）。"""
+    custom = (os.environ.get("YFSP_LOGIN_ENTRY_CSS") or "").strip() or _load_yfsp_login_entry_css()
+    if custom:
+        try:
+            loc = page.locator(custom).first
+            loc.wait_for(state="visible", timeout=6000)
+            loc.scroll_into_view_if_needed()
+            loc.click(force=True, timeout=5000)
+            print(f"✅ 已使用自定义登录入口 CSS: {custom}")
+            return True
+        except Exception as e:
+            print(f"⚠️ 自定义 YFSP_LOGIN_ENTRY_CSS / yfsp_ui_config.json 未点到 ({e})，继续自动探测…")
+
+    for sel in YFSP_BUILTIN_LOGIN_CSS_FALLBACKS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=5000)
+            loc.scroll_into_view_if_needed()
+            loc.click(force=True, timeout=5000)
+            print("✅ 已点击内置顶栏「登录」选择器")
+            return True
+        except Exception:
+            continue
+
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    time.sleep(0.35)
+
+    strategy = page.evaluate(
+        """() => {
+        function visible(el) {
+            if (!el) return '';
+            const st = window.getComputedStyle(el);
+            if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0)
+                return '';
+            const r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.top > window.innerHeight + 400)
+                return '';
+            return 'ok';
+        }
+        function norm(s) {
+            return (s || '').replace(/\\s+/g, ' ').trim();
+        }
+        // 0) 纯文本节点「登录」且在视口右上（头像右侧两字常见为独立文本节点）
+        const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let tn;
+        while (tn = tw.nextNode()) {
+            if (norm(tn.nodeValue) !== '登录') continue;
+            let el = tn.parentElement;
+            if (!el || !visible(el)) continue;
+            const r = el.getBoundingClientRect();
+            if (r.left < window.innerWidth * 0.48) continue;
+            if (r.top > 220) continue;
+            let target = el;
+            if (window.getComputedStyle(el).pointerEvents === 'none') {
+                let q = el.parentElement;
+                for (let k = 0; k < 6 && q; k++) {
+                    if (window.getComputedStyle(q).pointerEvents !== 'none') {
+                        target = q;
+                        break;
+                    }
+                    q = q.parentElement;
+                }
+            }
+            target.click();
+            return 'textnode-login-topright';
+        }
+        // 0b) header 内靠右小图与同容器内精确「登录」子节点
+        const hdrs = document.querySelectorAll('header, [class*="header"], [class*="Header"], [class*="top-bar"], [class*="TopBar"]');
+        const roots = hdrs.length ? Array.from(hdrs) : [document.body];
+        for (const root of roots) {
+            for (const img of root.querySelectorAll('img')) {
+                const r = img.getBoundingClientRect();
+                if (r.right < window.innerWidth * 0.50 || r.top > 220 || r.width < 6 || r.height < 6)
+                    continue;
+                const wrap = img.closest('a, button, [role="button"], div, span, li') || img.parentElement;
+                if (!wrap) continue;
+                for (const leaf of wrap.querySelectorAll('span, a, em, i, b, strong, p, div, label')) {
+                    if (leaf.contains && leaf.contains(img)) continue;
+                    if (norm(leaf.textContent) !== '登录') continue;
+                    if (!visible(leaf)) continue;
+                    leaf.click();
+                    return 'header-row-login-label';
+                }
+                let sib = img.nextElementSibling;
+                for (let j = 0; j < 5 && sib; j++) {
+                    for (const leaf of sib.querySelectorAll ? sib.querySelectorAll('span, a, em, i') : []) {
+                        if (norm(leaf.textContent) === '登录' && visible(leaf)) {
+                            leaf.click();
+                            return 'img-next-sibling-deep';
+                        }
+                    }
+                    if (norm(sib.textContent) === '登录' && visible(sib)) {
+                        sib.click();
+                        return 'img-next-sibling';
+                    }
+                    sib = sib.nextElementSibling;
+                }
+            }
+        }
+        // 1) 默认头像：取最靠右的候选，避免点到页内其它小图
+        const imgSelectors = [
+            'img[src*="logon"]',
+            'img[src*="logon.png"]',
+            'img[alt*="头像"]',
+            '.user-icon img',
+            'header img[src*="user"]'
+        ];
+        let bestImg = null;
+        let bestRight = -1;
+        for (const sel of imgSelectors) {
+            for (const img of document.querySelectorAll(sel)) {
+                if (!visible(img)) continue;
+                const r = img.getBoundingClientRect();
+                if (r.right < window.innerWidth * 0.45) continue;
+                if (r.top > 240) continue;
+                if (r.right > bestRight) {
+                    bestRight = r.right;
+                    bestImg = img;
+                }
+            }
+        }
+        if (bestImg) {
+            let p = bestImg.parentElement;
+            for (let i = 0; i < 14 && p; i++) {
+                const tag = p.tagName;
+                const cls = (p.className || '').toString();
+                if (tag === 'A' || tag === 'BUTTON' || p.getAttribute('role') === 'button') {
+                    p.click();
+                    return 'header-cta';
+                }
+                if (/user|login|avatar|logon|account|member|nav|bar/i.test(cls)) {
+                    p.click();
+                    return 'class-wrapper';
+                }
+                p = p.parentElement;
+            }
+            bestImg.click();
+            return 'img-direct';
+        }
+        // 2) 精确文案
+        const tags = 'a, button, span, div, p, li, em, strong, label';
+        const prefer = ['立即登录', '登录'];
+        for (const kw of prefer) {
+            const nodes = document.querySelectorAll(tags);
+            for (const el of nodes) {
+                const t = norm(el.textContent);
+                if (t !== kw) continue;
+                if (!visible(el)) continue;
+                if (kw === '登录' && el.getBoundingClientRect().left < window.innerWidth * 0.45)
+                    continue;
+                el.click();
+                return kw;
+            }
+        }
+        return '';
+    }"""
+    )
+    if strategy:
+        print(f"✅ 已尝试点击登录入口（页面内脚本: {strategy}）")
+        return True
+
+    xpath_candidates = [
+        'xpath=//header//img/following-sibling::*//*[normalize-space()="登录"]',
+        'xpath=//header//*[normalize-space()="登录"]',
+        'xpath=//*[contains(@class,"header") or contains(@class,"Header")]//*[normalize-space()="登录"]',
+    ]
+    for xp in xpath_candidates:
+        try:
+            loc = page.locator(xp).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=2000)
+            loc.scroll_into_view_if_needed()
+            loc.click(force=True, timeout=4000)
+            disp = xp if len(xp) <= 80 else xp[:78] + "…"
+            print(f"✅ 已通过 XPath 点击登录入口: {disp}")
+            return True
+        except Exception:
+            continue
+
+    playwright_targets = [
+        page.locator("header").get_by_text("登录", exact=True),
+        page.locator('[class*="header"]').first.get_by_text("登录", exact=True),
+        page.get_by_role("button", name="立即登录"),
+        page.get_by_role("link", name="立即登录"),
+        page.get_by_role("button", name="登录"),
+        page.get_by_role("link", name="登录"),
+        page.get_by_text("立即登录", exact=True),
+        page.get_by_text("登录", exact=True),
+    ]
+    for loc in playwright_targets:
+        try:
+            tgt = loc.first
+            if tgt.count() == 0:
+                continue
+            tgt.wait_for(state="visible", timeout=2000)
+            tgt.scroll_into_view_if_needed()
+            tgt.click(force=True, timeout=5000)
+            print("✅ 已通过 Playwright 定位点击登录入口")
+            return True
+        except Exception:
+            continue
+
+    css_list = [
+        'header a:has-text("立即登录")',
+        'header button:has-text("立即登录")',
+        'a:has-text("立即登录")',
+        'button:has-text("立即登录")',
+        'header a:has-text("登录")',
+        'header span:has-text("登录")',
+        'a:has-text("登录")',
+        'button:has-text("登录")',
+        'span:has-text("登录")',
+        'div.user-entry:visible',
+        '[class*="login"]:visible',
+    ]
+    for sel in css_list:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=2000)
+            loc.scroll_into_view_if_needed()
+            loc.click(force=True, timeout=5000)
+            print(f"✅ 已点击 CSS 选择器: {sel}")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _yfsp_wait_login_iframe(page, total_timeout_ms=25000):
+    """等待登录 iframe 出现在 DOM（弹层可能先 attached 再显示）。"""
+    deadline = time.time() + total_timeout_ms / 1000.0
+    combined = "iframe#Dn_Login_Iframe, iframe[src*='login'], iframe[src*='Login'], iframe[id*='Login'], iframe[id*='login']"
+    last_err = None
+    while time.time() < deadline:
+        try:
+            page.wait_for_selector(combined, timeout=3000, state="attached")
+            handle = page.query_selector(combined)
+            if handle:
+                return handle
+        except Exception as e:
+            last_err = e
+        time.sleep(0.35)
+    if last_err:
+        logging.warning(f"等待登录 iframe: {last_err}")
+    return None
+
+
+def open_yfsp_login_iframe_and_fill(page, email, password, start_url="https://www.yfsp.tv/list/anime"):
+    """打开站点登录框、切换到「其他方式登录」、填写邮箱与密码。不执行滑动验证、不点击提交。"""
+    page.goto(start_url, timeout=60000, wait_until="domcontentloaded")
+    try:
+        page.wait_for_load_state("load", timeout=25000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_load_state("networkidle", timeout=8000)
+    except Exception:
+        pass
+    time.sleep(1.0)
+
+    iframe_el = None
+    for attempt in range(1, 5):
+        iframe_el = _yfsp_wait_login_iframe(page, total_timeout_ms=1200)
+        if iframe_el:
+            break
+        clicked = _yfsp_try_open_login_modal(page)
+        if clicked:
+            time.sleep(0.75)
+        iframe_el = _yfsp_wait_login_iframe(page, total_timeout_ms=8000)
+        if iframe_el:
+            break
+        print(f"⚠️ 第 {attempt} 次未检测到登录 iframe，重试打开…")
+        time.sleep(0.6)
+
+    if not iframe_el:
+        raise RuntimeError(
+            "未检测到登录弹层（iframe）。请先在浏览器里手动点一次右上角「登录」确认能弹出；"
+            "若仍失败，可在 account_data/yfsp_ui_config.json 写入 "
+            '{"login_entry_css": "从开发者工具复制的选择器"}，'
+            "或设置环境变量 YFSP_LOGIN_ENTRY_CSS 为同一 CSS 选择器。"
+        )
+
+    print("等待登录 iframe …")
+    login_frame = iframe_el.content_frame()
+    if not login_frame:
+        raise RuntimeError("❌ 拿不到登录的 frame 对象")
+
+    tab_li = login_frame.locator('ul.tabs li#mlogin')
+    tab_li.wait_for(state="visible", timeout=10000)
+    tab_li.scroll_into_view_if_needed()
+
+    for attempt in range(1, 4):
+        print(f'尝试点击"其他方式登录" 第 {attempt} 次...')
+        tab_li.click(force=True)
+        try:
+            login_frame.wait_for_function(
+                """() => {
+                    const li = document.querySelector('ul.tabs li#mlogin');
+                    return li && li.classList.contains('is-active');
+                }""",
+                timeout=3000,
+            )
+            print('✅ 已成功切换到 "其他方式登录"')
+            break
+        except PlaywrightTimeoutError:
+            print("⚠️ 本次点击未生效，1s 后重试…")
+            time.sleep(1)
+    else:
+        raise RuntimeError("❌ 重试 3 次仍未切换到「其他方式登录」")
+
+    print("⏳ 正在填写账号密码…")
+    login_frame.fill('input[name="Email"]', email)
+    login_frame.fill('input[name="UserPass"]', password)
+    return login_frame
+
+
 def manual_login(account_name):
-    """手动登录账号（打开可见浏览器，用户手动完成登录和人机验证）
-    
-    Args:
-        account_name: 账号名称
-    """
+    """手动登录：打开可见浏览器。若 account.json 中有该账号凭据则自动填邮箱密码；否则仍会尝试点开顶栏「登录」。"""
     data_dir = 'account_data'
     os.makedirs(data_dir, exist_ok=True)
     
     if not account_name or not account_name.strip():
         print("❌ 账号名称不能为空")
         return False
+
+    account_name = account_name.strip()
+    login_email, login_password = load_account_credentials(account_name, data_dir)
     
     print(f"\n🔐 开始手动登录账号: {account_name}")
     print("=" * 50)
     print("⚠️  注意事项:")
-    print("   1. 浏览器将打开登录页面")
-    print("   2. 请手动完成登录（包括人机验证）")
-    print("   3. 登录成功后，请按回车键保存登录状态")
+    if login_email and login_password:
+        print(f"   1. 已从 account_data/account.json 读取该账号邮箱与密码，将自动点击「登录」并填写")
+        print("   2. 请在登录弹窗内手动拖动滑块完成人机验证，然后点击弹窗内的「登录」提交")
+        print("   3. 登录成功后，回到终端按回车键保存登录状态")
+    else:
+        print("   1. 未在 account_data/account.json 中找到该账号凭据：仍会尝试自动点击顶栏「登录」")
+        print("   2. 需要自动填邮箱密码时，请执行 add 写入 account.json，或手工编辑该文件")
+        print("   3. 登录成功后回到终端按回车保存；按回车前请勿关闭浏览器窗口")
     print("=" * 50)
     
     browser = None
@@ -2165,54 +2562,107 @@ def manual_login(account_name):
                 # 不设置 user_agent，使用浏览器默认值
             )
             page = context.new_page()
-            
-            # 导航到网站 - 使用更宽松的等待策略
-            print("正在打开网站（可能需要较长时间）...")
-            try:
-                # 使用 wait_until="commit" 避免等待完整加载
-                page.goto("https://www.yfsp.tv", timeout=60000, wait_until="commit")
-                print("✅ 页面已开始加载")
-            except Exception as nav_error:
-                print(f"⚠️ 页面加载遇到问题: {str(nav_error)}")
-                print("   浏览器已打开，你可以手动在地址栏输入网址")
-            
-            # 尝试等待页面加载，但不强制要求
-            try:
-                page.wait_for_load_state("domcontentloaded", timeout=15000)
-            except:
-                pass  # 忽略超时，让用户继续操作
+
+            if login_email and login_password:
+                print("\n正在打开站点并自动填写登录表单…")
+                try:
+                    open_yfsp_login_iframe_and_fill(page, login_email, login_password)
+                    print("✅ 已在登录弹窗中填写邮箱与密码")
+                except Exception as e:
+                    print(f"⚠️ 自动打开登录或填写失败: {e}")
+                    print("   请你在浏览器中自行完成：打开 https://www.yfsp.tv 并点击「登录」…")
+                    try:
+                        page.goto("https://www.yfsp.tv", timeout=60000, wait_until="commit")
+                        page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+            else:
+                print("正在打开页面并尝试自动点击顶栏「登录」…")
+                try:
+                    page.goto(
+                        "https://www.yfsp.tv/list/anime",
+                        timeout=60000,
+                        wait_until="domcontentloaded",
+                    )
+                    print("✅ 页面已开始加载")
+                except Exception as nav_error:
+                    print(f"⚠️ 打开 list/anime 失败: {nav_error}，改试首页…")
+                    try:
+                        page.goto(
+                            "https://www.yfsp.tv",
+                            timeout=60000,
+                            wait_until="domcontentloaded",
+                        )
+                    except Exception:
+                        pass
+                try:
+                    page.wait_for_load_state("load", timeout=20000)
+                except Exception:
+                    pass
+                time.sleep(1.2)
+                any_click = False
+                for attempt in range(1, 4):
+                    if _yfsp_try_open_login_modal(page):
+                        any_click = True
+                        print(f"✅ 第 {attempt} 次：已尝试点击「登录」入口")
+                    time.sleep(0.55)
+                    if _yfsp_wait_login_iframe(page, total_timeout_ms=4500):
+                        print("✅ 已检测到登录弹层，可在其中输入账号并完成验证")
+                        break
+                if not any_click:
+                    print("⚠️ 自动点击未触发，请手动点击页面右上角「登录」")
             
             # 设置页面缩放为 90%，确保所有元素（如头像）可见
             try:
                 page.evaluate("document.body.style.zoom = '0.9'")
                 print("✅ 已设置页面缩放为 90%")
-            except:
+            except Exception:
                 pass
             
             print("\n" + "=" * 50)
-            print("🌐 浏览器已打开，请手动完成以下步骤:")
-            print("   1. 如页面未加载，请手动刷新或输入网址: https://www.yfsp.tv")
-            print("   2. 点击「登录」按钮")
-            print("   3. 输入账号密码")
-            print("   4. 完成人机验证")
-            print("   5. 确认登录成功（能看到个人头像）")
+            if login_email and login_password:
+                print("🌐 接下来请你:")
+                print("   · 在登录弹窗内手动完成滑动验证")
+                print("   · 点击弹窗内的「登录」按钮提交")
+                print("   · 确认页面已登录（如右上角头像）后，回到终端按回车")
+            else:
+                print("🌐 若已弹出登录框，请在窗口内手动输入邮箱与密码并完成验证；否则请手动点右上角「登录」")
+                print(
+                    "   自动填表依赖 account_data/account.json 中该账号条目（email、password），"
+                    "不是从浏览器或系统里「提取」密码。"
+                )
+                print(
+                    f"   可先执行: python main.py add {account_name} --eml <邮箱> --pwd <密码> 写入 account.json，"
+                    "再重新 login 即可自动填写。"
+                )
+                print("   确认已登录后，回到终端按回车保存。")
             print("=" * 50)
-            
+            print("💡 保存登录态前请勿关闭浏览器窗口。")
+
             # 等待用户手动登录
             input("\n✅ 登录成功后，请按回车键保存登录状态...")
             
             # 检查页面是否还存在
             try:
                 _ = page.url  # 测试页面是否还活着
-            except:
+            except Exception:
                 print("❌ 浏览器已关闭，无法保存状态")
                 return False
-            
+
+            try:
+                if not browser.is_connected():
+                    print(
+                        "❌ 浏览器已关闭，无法检测或保存登录状态。"
+                        "请重新执行 login，完成登录后在终端按回车前保持浏览器窗口打开。"
+                    )
+                    return False
+            except Exception:
+                pass
+
             # 检查登录状态
             try:
                 is_logged_in = check_login_status(page)
-            except:
-                # 如果检查失败，假设用户已确认登录成功
+            except Exception:
                 print("⚠️ 无法自动检测登录状态，假设用户已确认登录成功")
                 is_logged_in = True
             
@@ -2267,18 +2717,15 @@ def manual_login(account_name):
 
 
 def add_account(account_name, email=None, password=None, headless=False):
-    """添加新账号（保存账号信息，建议使用 login 命令手动登录）
-    
-    Args:
-        account_name: 账号名称
-        email: 邮箱地址
-        password: 密码
-        headless: 是否使用无头模式
+    """仅将账号邮箱与密码写入 account_data/account.json（合并更新），不打开浏览器、不尝试登录。
+
+    headless 参数已废弃，仅为兼容旧调用保留。
     """
-    data_dir = 'account_data'
+    _ = headless
+    data_dir = "account_data"
     os.makedirs(data_dir, exist_ok=True)
-    
-    if not account_name.strip():
+
+    if not (account_name or "").strip():
         print("❌ 账号名称不能为空")
         return False
 
@@ -2286,207 +2733,31 @@ def add_account(account_name, email=None, password=None, headless=False):
         print("❌ 邮箱和密码不能为空")
         return False
 
-    print(f"\n➡️ 开始添加账号: {account_name}")
+    account_name = account_name.strip()
+    email = email.strip()
+    password = str(password)
 
-    # 保存账号信息
-    account_info = {
-        'account_name': account_name,
-        'email': email,
-        'password': password
-    }
-    account_file = os.path.join(data_dir, f"{account_name}_account.json")
-    with open(account_file, 'w', encoding='utf-8') as f:
-        json.dump(account_info, f, ensure_ascii=False, indent=2)
-    print(f"✅ 已保存账号信息到 {account_file}")
+    path = os.path.join(data_dir, "account.json")
+    db = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                db = raw
+            else:
+                print("⚠️ 现有 account.json 格式异常（非对象），将按空对象重新合并写入")
+        except Exception as e:
+            print(f"⚠️ 读取现有 account.json 失败，将重新写入: {e}")
 
-    # 保存账号名称到列表
-    accounts_file = os.path.join(data_dir, "accounts.txt")
-    accounts = []
-    if os.path.exists(accounts_file):
-        with open(accounts_file, 'r', encoding='utf-8') as f:
-            accounts = [line.strip() for line in f if line.strip()]
-    
-    if account_name not in accounts:
-        accounts.append(account_name)
-        with open(accounts_file, 'w', encoding='utf-8') as f:
-            for acc in accounts:
-                f.write(f"{acc}\n")
-        print(f"✅ 已添加账号到列表: {account_name}")
-    else:
-        print(f"⚠️ 账号 {account_name} 已存在于列表中")
+    db[account_name] = {"email": email, "password": password}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
-        
-        # 设置窗口大小
-        if not headless:
-            page.set_viewport_size({"width": 2560, "height": 1440})
-
-        # 打开页面并点击 "登录"
-        page.goto("https://www.yfsp.tv/list/anime", timeout=30000)
-        page.wait_for_load_state("networkidle", timeout=20000)
-        for sel in ['a:has-text("登录")', 'button:has-text("登录")', '[class*="login"]:visible']:
-            try:
-                btns = page.locator(sel).all()
-                for b in btns:
-                    if b.is_visible():
-                        print("点击登录按钮…")
-                        b.click()
-                        raise StopIteration
-            except StopIteration:
-                break
-
-        # 拿到 iframe
-        print("等待登录 iframe …")
-        iframe_el = page.wait_for_selector("iframe#Dn_Login_Iframe", timeout=15000)
-        login_frame = iframe_el.content_frame()
-        if not login_frame:
-            raise RuntimeError("❌ 拿不到登录的 frame 对象")
-
-        # 找到 tab 的 <li>（也可以直接选 a，但用 li 保证事件委托生效）
-        tab_li = login_frame.locator('ul.tabs li#mlogin')
-        tab_li.wait_for(state="visible", timeout=10000)
-        tab_li.scroll_into_view_if_needed()
-
-        # 重试逻辑：点 3 次，每次点完等状态变化
-        for attempt in range(1, 4):
-            print(f'尝试点击"其他方式登录" 第 {attempt} 次...')
-            tab_li.click(force=True)
-
-            try:
-                # 判断父节点是否切上了 is-active
-                login_frame.wait_for_function(
-                    """() => {
-                        const li = document.querySelector('ul.tabs li#mlogin');
-                        return li && li.classList.contains('is-active');
-                    }""",
-                    timeout=3000
-                )
-                print('✅ 已成功切换到 "其他方式登录"')
-                break
-            except PlaywrightTimeoutError:
-                print("⚠️ 本次点击未生效，1s 后重试…")
-                time.sleep(1)
-        else:
-            print("❌ 重试 3 次仍未切换，请检查控制台或截图进一步调试")
-
-        print("⏳ 正在填写账号密码…")
-        # 1. 填写账号密码
-        login_frame.fill('input[name="Email"]', email)
-        login_frame.fill('input[name="UserPass"]', password)
-
-        # 执行滑动验证
-        slide_verify(login_frame)
-        
-        # 6. 等待验证结果并登录
-        max_verify_retries = 3  # 验证失败后的最大重试次数
-        verify_retry_count = 0
-        
-        while verify_retry_count < max_verify_retries:
-            try:
-                print("⏳ 等待验证结果...")
-                
-                # 检查验证状态
-                max_retries = 3
-                for retry in range(max_retries):
-                    if login_frame.locator('.slide-to-unlock-handle.success').count() > 0:
-                        print("✅ 滑动验证已通过")
-                        break
-                    if login_frame.locator('.slide-to-unlock-handle.fail').count() > 0:
-                        print("❌ 滑动验证失败，重试中...")
-                        time.sleep(1)
-                        continue
-                    time.sleep(1)
-                
-                if login_frame.locator('.slide-to-unlock-handle.success').count() == 0:
-                    print("❌ 滑动验证未通过")
-                    verify_retry_count += 1
-                    if verify_retry_count < max_verify_retries:
-                        print(f"🔄 准备第 {verify_retry_count + 1} 次重试...")
-                        # 重新执行滑动验证
-                        slide_verify(login_frame)
-                        continue
-                    else:
-                        print("❌ 已达到最大重试次数，请手动重试")
-                        raise PlaywrightTimeoutError("验证未通过")
-                
-                # 等待登录按钮变为可用状态
-                print("⏳ 等待登录按钮变为可用状态...")
-                login_button = login_frame.locator('button.btn-login:not(.disabled)')
-                login_button.wait_for(state="visible", timeout=5000)
-                
-                # 尝试多种方式点击登录按钮
-                print("⏳ 正在点击登录按钮...")
-                try:
-                    login_button.click()
-                    print("✅ 已通过直接点击方式触发登录")
-                except Exception as e1:
-                    try:
-                        login_button.evaluate('button => button.click()')
-                        print("✅ 已通过 JavaScript 方式触发登录")
-                    except Exception as e2:
-                        login_button.evaluate('button => { const event = new MouseEvent("click", { bubbles: true, cancelable: true }); button.dispatchEvent(event); }')
-                        print("✅ 已通过事件触发方式触发登录")
-                
-                # 等待登录完成
-                print("⏳ 等待登录完成...")
-                try:
-                    # 等待页面完全加载
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                    # 等待URL变化
-                    page.wait_for_url("**/list/anime", timeout=10000)
-                    print("✅ 登录完成")
-                    
-                    # 确保页面完全加载后再保存状态
-                    time.sleep(2)  # 额外等待以确保所有状态都已保存
-                    
-                    # 保存登录状态
-                    state_file = os.path.join(data_dir, f"{account_name}_storage.json")
-                    save_storage_state(context, state_file)
-                    print(f"✅ 已保存登录状态到 {state_file}")
-                    
-                    # 如果不是无头模式，等待用户确认
-                    if not headless:
-                        print("\n✅ 账号添加完成！请按回车键关闭浏览器...")
-                        input()
-                    
-                    # 如果成功登录，跳出重试循环
-                    return True
-                    
-                except PlaywrightTimeoutError:
-                    if page.locator('text=退出登录').count() > 0:
-                        print("✅ 登录完成（通过检查退出按钮确认）")
-                        
-                        # 保存登录状态
-                        state_file = os.path.join(data_dir, f"{account_name}_storage.json")
-                        save_storage_state(context, state_file)
-                        print(f"✅ 已保存登录状态到 {state_file}")
-                        
-                        # 如果不是无头模式，等待用户确认
-                        if not headless:
-                            print("\n✅ 账号添加完成！请按回车键关闭浏览器...")
-                            input()
-                        
-                        return True
-                    else:
-                        print("⚠️ 登录状态不确定，请检查页面")
-                        raise
-                
-            except PlaywrightTimeoutError as e:
-                print("❌ 操作超时，请检查页面状态")
-                verify_retry_count += 1
-                if verify_retry_count < max_verify_retries:
-                    print(f"🔄 准备第 {verify_retry_count + 1} 次重试...")
-                    # 重新执行滑动验证
-                    slide_verify(login_frame)
-                    continue
-                else:
-                    print("❌ 重试次数已达上限，请检查网络连接或稍后再试")
-                    raise
-        
-        return False
+    print(f"\n✅ 已将账号「{account_name}」的邮箱与密码写入 {path}")
+    print("   请执行: python main.py login <账号名> 在浏览器中完成登录（凭据从 account.json 读取）。")
+    print("   login 成功后会保存登录态并可将账号加入 accounts.txt，之后 list/run 才能包含该账号。")
+    return True
 
 def slide_verify(login_frame):
     # 1. 定位滑块手柄和轨道
@@ -2658,8 +2929,8 @@ def auto_operations(operation_type='all', headless=True):
 def show_help():
     """显示帮助信息"""
     print("\n📋 可用命令:")
-    print("  python main.py login <账号名>   - 🔐 手动登录（推荐，可绕过人机验证）")
-    print("  python main.py add <账号名>     - 添加账号（需自动登录，可能遇到验证码）")
+    print("  python main.py login <账号名>   - 🔐 手动登录（account.json 有凭据时自动填邮箱密码，滑块手拖）")
+    print("  python main.py add <账号名>      - 仅将邮箱密码写入 account_data/account.json（不打开浏览器）")
     print("  python main.py run              - 为所有账号执行签到和分享操作")
     print("  python main.py checkin          - 仅执行签到操作")
     print("  python main.py share            - 仅执行分享操作")
@@ -2669,9 +2940,11 @@ def show_help():
     print("  python main.py help             - 显示此帮助信息")
     print("\n选项:")
     print("  --visible                       - 使用可见浏览器（默认为隐藏模式运行）")
+    print("\n登录入口点不到时:")
+    print("  account_data/yfsp_ui_config.json 中 login_entry_css，或环境变量 YFSP_LOGIN_ENTRY_CSS")
     print("\n💡 推荐用法:")
-    print("  1. 先使用 login 命令手动登录账号（可手动完成人机验证）")
-    print("  2. 然后使用 run/checkin/share 执行自动操作")
+    print("  1. add 写入 account.json，再 login 在浏览器中完成登录并保存状态")
+    print("  2. 使用 run/checkin/share 执行自动操作")
 
 def list_accounts():
     """列出所有已保存的账号"""
@@ -2868,54 +3141,66 @@ def get_coins_for_all_accounts(headless=True):
         print("\n✅ 已发送邮件通知")
 
 def delete_account(account_name):
-    """删除指定账号"
-    
-    Args:
-        account_name: 要删除的账号名称
-    """
-    data_dir = 'account_data'
-    
-    if not account_name:
+    """删除账号：移除 account.json 中的凭据、旧版 *_account.json、登录态，并从 accounts.txt 移除（若在该列表中）。"""
+    data_dir = "account_data"
+
+    if not account_name or not str(account_name).strip():
         print("❌ 请提供要删除的账号名称")
         return False
-        
-    # 检查账号是否存在
+
+    account_name = str(account_name).strip()
     accounts_file = os.path.join(data_dir, "accounts.txt")
-    if not os.path.exists(accounts_file):
-        print(f"❌ 账号列表文件不存在")
-        return False
-        
-    # 读取账号列表
     accounts = []
-    with open(accounts_file, 'r', encoding='utf-8') as f:
-        accounts = [line.strip() for line in f if line.strip()]
-        
-    if account_name not in accounts:
-        print(f"❌ 账号 {account_name} 不存在")
+    if os.path.exists(accounts_file):
+        with open(accounts_file, "r", encoding="utf-8") as f:
+            accounts = [line.strip() for line in f if line.strip()]
+    in_list = account_name in accounts
+
+    db_path = os.path.join(data_dir, "account.json")
+    in_db = False
+    db = {}
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                db = raw
+                in_db = account_name in db
+        except Exception as e:
+            print(f"⚠️ 读取 account.json 失败: {e}")
+
+    legacy_path = os.path.join(data_dir, f"{account_name}_account.json")
+    state_file = os.path.join(data_dir, f"{account_name}_storage.json")
+    orphan = os.path.exists(legacy_path) or os.path.exists(state_file)
+
+    if not in_list and not in_db and not orphan:
+        print(f"❌ 账号 {account_name} 不存在（未在 accounts.txt、account.json 中找到，且无旧凭据/状态文件）")
         return False
-        
+
     try:
-        # 删除存储文件
-        state_file = os.path.join(data_dir, f"{account_name}_storage.json")
         if os.path.exists(state_file):
             os.remove(state_file)
             print(f"✅ 已删除账号存储文件: {state_file}")
-            
-        # 删除账号信息文件
-        account_file = os.path.join(data_dir, f"{account_name}_account.json")
-        if os.path.exists(account_file):
-            os.remove(account_file)
-            print(f"✅ 已删除账号信息文件: {account_file}")
-            
-        # 从账号列表中移除
-        accounts.remove(account_name)
-        with open(accounts_file, 'w', encoding='utf-8') as f:
-            for acc in accounts:
-                f.write(f"{acc}\n")
-                
-        print(f"✅ 已从账号列表中移除: {account_name}")
+
+        if os.path.exists(legacy_path):
+            os.remove(legacy_path)
+            print(f"✅ 已删除旧版凭据文件: {legacy_path}")
+
+        if in_db:
+            del db[account_name]
+            with open(db_path, "w", encoding="utf-8") as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+            print(f"✅ 已从 account.json 移除账号: {account_name}")
+
+        if in_list:
+            accounts.remove(account_name)
+            with open(accounts_file, "w", encoding="utf-8") as f:
+                for acc in accounts:
+                    f.write(f"{acc}\n")
+            print(f"✅ 已从 accounts.txt 移除: {account_name}")
+
         return True
-        
+
     except Exception as e:
         print(f"❌ 删除账号时出错: {str(e)}")
         return False
@@ -2981,7 +3266,7 @@ def main():
     if command == 'add':
         if len(sys.argv) < 6:
             print("❌ 请提供账号名称、邮箱和密码")
-            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码> [--visible]")
+            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码>")
             return
             
         # 解析参数
@@ -3002,13 +3287,10 @@ def main():
         
         if not account_name or not email or not password:
             print("❌ 缺少必要的参数")
-            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码> [--visible]")
+            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码>")
             return
-        
-        # 添加调试信息
-        print(f"DEBUG: 解析参数 - 账号名称: {account_name}, 邮箱: {email}, 密码: {password}")
             
-        add_account(account_name, email, password, headless=headless)
+        add_account(account_name, email, password)
     
     elif command == 'delete':
         if len(sys.argv) < 3:
