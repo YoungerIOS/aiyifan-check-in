@@ -29,9 +29,9 @@ playwright install chromium
 
 ## 使用方法
 
-### 添加 / 保存账号邮箱与密码（仅写本地文件）
+### 添加 / 保存账号名称、邮箱、密码
 
-`add` 把邮箱、密码合并写入 `account_data/account.json`
+把邮箱、密码信息保存在 `account_data/account.json`
 
 ```bash
 python main.py add <账号名称> --eml <邮箱> --pwd <密码>
