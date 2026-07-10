@@ -31,13 +31,13 @@ playwright install chromium
 
 ### 添加 / 保存邮箱、密码
 
-把邮箱、密码信息保存在 `account_data/account.json`，账号名称会自动使用邮箱 `@` 前面的部分。
+把邮箱、密码信息保存在 `account_data/account.json`，账号名称自动使用邮箱前缀。
 
 ```bash
 python main.py add <邮箱> <密码>
 ```
 
-随后在浏览器里完成登录并保存状态（`login` 会从 `account.json` 读取凭据用于自动填表）：
+随后在浏览器里完成登录并保存状态（`login` 会从 `account.json` 读取凭据用于自动填表，只需手动完成滑动验证）：
 
 ```bash
 python main.py login <邮箱前缀>
@@ -46,12 +46,12 @@ python main.py login <邮箱前缀>
 登录成功后脚本会自动检测、保存登录态并关闭浏览器；如需延长等待时间可使用：
 
 ```bash
-python main.py login <邮箱@前缀> --timeout 300
+python main.py login <邮箱前缀> --timeout 300
 ```
 
 ### 删除账号
 ```bash
-python main.py delete <账号名称>
+python main.py delete <邮箱前缀>
 ```
 
 如果不确定账号名称，可以先执行：`python main.py list`
