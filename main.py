@@ -12,6 +12,14 @@ from email.mime.text import MIMEText
 from email.header import Header
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import traceback
+import contextlib
+import io
+
+
+def short_error(error):
+    """将 Playwright 的长错误压缩成一行，避免批量任务刷屏。"""
+    return str(error).splitlines()[0]
+
 
 # 配置日志
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -149,7 +157,7 @@ def check_login_status(page):
     except Exception as e:
         msg = str(e).lower()
         if "has been closed" in msg or ("closed" in msg and "target" in msg):
-            print("❌ 页面或浏览器已关闭，无法判断登录状态（请保持浏览器打开至按回车保存后再关）")
+            print("❌ 页面或浏览器已关闭，无法判断登录状态（请保持浏览器打开至自动保存完成）")
         else:
             print(f"❌ 检查登录状态时出错: {str(e)}")
         return False
@@ -232,7 +240,10 @@ def load_storage_state(context, file_path):
                 page = context.new_page()
                 try:
                     # 先导航到目标网站以获取正确的源
-                    page.goto("https://www.yfsp.tv", wait_until="networkidle")
+                    try:
+                        page.goto("https://www.yfsp.tv", wait_until="domcontentloaded", timeout=45000)
+                    except PlaywrightTimeoutError as e:
+                        print(f"⚠️ 恢复 localStorage 时打开首页超时，继续使用已加载 cookies: {short_error(e)}")
                     
                     # 处理origins是列表的情况
                     if isinstance(storage['origins'], list):
@@ -314,9 +325,14 @@ def direct_click_sign_in_button(page):
             # 尝试导航到个人中心页面
             try:
                 print("正在导航到个人中心页面...")
-                page.goto("https://www.yfsp.tv/user/index", timeout=60000)
-                page.wait_for_load_state("networkidle", timeout=30000)
-                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                try:
+                    page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    print(f"⚠️ 导航打开个人中心超时: {short_error(e)}，尝试继续")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
                 time.sleep(3)  # 额外等待确保页面加载
             except Exception as e:
                 print(f"导航到个人中心页面失败: {str(e)}")
@@ -817,14 +833,14 @@ def share_video(page):
         
         # 导航到动漫列表页面，而不是首页
         print("正在导航到动漫列表页面...")
-        page.goto("https://www.yfsp.tv/list/anime?orderBy=1", timeout=30000)
+        page.goto("https://www.yfsp.tv/list/anime?orderBy=1", timeout=45000, wait_until="domcontentloaded")
         time.sleep(3)
         
         # 确保页面完全加载
         try:
-            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
         except Exception as e:
-            print(f"等待页面加载时出错: {str(e)}，继续执行")
+            print(f"⚠️ 等待页面加载超时，继续执行: {short_error(e)}")
         time.sleep(2)  # 额外等待，确保JavaScript完成渲染
         
             
@@ -892,7 +908,10 @@ def share_video(page):
                     video_href = selected_link.get('href')
                     video_url = "https://www.yfsp.tv" + video_href if video_href.startswith("/") else video_href
                     # print(f"直接导航到视频页面: {video_url}")
-                    page.goto(video_url, timeout=30000)
+                    try:
+                        page.goto(video_url, timeout=30000, wait_until="domcontentloaded")
+                    except Exception as e:
+                        print(f"⚠️ 导航到视频页面超时: {short_error(e)}，尝试继续")
                     time.sleep(5)
                     
                     # 等待视频页面加载
@@ -930,7 +949,10 @@ def share_video(page):
                 if href:
                     full_url = "https://www.yfsp.tv" + href if href.startswith("/") else href
                     # print(f"直接导航到视频页面: {full_url}")
-                    page.goto(full_url, timeout=30000)
+                    try:
+                        page.goto(full_url, timeout=30000, wait_until="domcontentloaded")
+                    except Exception as e:
+                        print(f"⚠️ 导航到视频页面超时: {short_error(e)}，尝试继续")
                     time.sleep(5)
                     
                     # 等待视频页面加载
@@ -972,9 +994,9 @@ def share_video(page):
         # 强制等待页面完全加载，确保所有元素都已渲染
         print("等待页面完全加载...")
         try:
-            page.wait_for_load_state("networkidle", timeout=20000)
-        except:
-            print("等待页面加载超时，但仍继续执行")
+            page.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception as e:
+            print(f"⚠️ 等待页面加载超时，继续执行: {short_error(e)}")
         time.sleep(3)  # 额外等待
 
         
@@ -1973,10 +1995,12 @@ def run_check_in_for_account(account_name, headless=False):
             
             # 加载保存的状态
             try:
-                load_storage_state(context, state_file)
+                if not load_storage_state(context, state_file):
+                    browser.close()
+                    return False
                 print(f"✅ 已加载账号 '{account_name}' 的登录状态")
             except Exception as e:
-                print(f"❌ 加载账号状态失败: {str(e)}")
+                print(f"❌ 加载账号状态失败: {short_error(e)}")
                 browser.close()
                 return False
             
@@ -1985,9 +2009,10 @@ def run_check_in_for_account(account_name, headless=False):
             
             # 访问网站
             print("正在打开个人中心...")
-            page.goto("https://www.yfsp.tv/user/index", wait_until="networkidle")
-            page.wait_for_load_state("networkidle", timeout=30000)
-            page.wait_for_load_state("domcontentloaded", timeout=30000)
+            try:
+                page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=45000)
+            except Exception as e:
+                print(f"⚠️ 打开个人中心超时: {short_error(e)}，尝试继续")
             time.sleep(5)
             
             # 检查登录状态
@@ -2031,8 +2056,7 @@ def run_check_in_for_account(account_name, headless=False):
                             return False
                     
                 except Exception as e:
-                    print(f"❌ 签到过程中出错: {str(e)}")
-                    traceback.print_exc()
+                    print(f"❌ 签到过程中出错: {short_error(e)}")
                     
                     if attempt < max_attempts:
                         print(f"准备第{attempt+1}次尝试...")
@@ -2047,8 +2071,7 @@ def run_check_in_for_account(account_name, headless=False):
             return False
             
         except Exception as e:
-            print(f"❌ 执行签到时出错: {str(e)}")
-            traceback.print_exc()
+            print(f"❌ 执行签到时出错: {short_error(e)}")
             return False
         finally:
             # 关闭浏览器
@@ -2087,16 +2110,21 @@ def run_share_video_for_account(account_name, headless=False):
                 
                 # 加载保存的状态
                 try:
-                    load_storage_state(context, state_file)
+                    if not load_storage_state(context, state_file):
+                        browser.close()
+                        return False
                     print(f"✅ 已加载账号 '{account_name}' 的登录状态")
                 except Exception as e:
-                    print(f"❌ 加载账号状态失败: {str(e)}")
+                    print(f"❌ 加载账号状态失败: {short_error(e)}")
                     browser.close()
                     return False
                 
                 # 打开页面
-                page.goto("https://www.yfsp.tv/")
-                page.wait_for_load_state("networkidle")
+                try:
+                    page.goto("https://www.yfsp.tv/", wait_until="domcontentloaded", timeout=45000)
+                except Exception as e:
+                    print(f"⚠️ 打开首页超时: {short_error(e)}，尝试继续")
+                time.sleep(3)
                 
                 # 检查登录状态
                 if not check_login_status(page):
@@ -2117,7 +2145,7 @@ def run_share_video_for_account(account_name, headless=False):
                 return success
                 
             except Exception as e:
-                print(f"❌ 执行分享操作时出错: {str(e)}")
+                print(f"❌ 执行分享操作时出错: {short_error(e)}")
                 if 'browser' in locals():
                     browser.close()
                 return False
@@ -2504,7 +2532,43 @@ def open_yfsp_login_iframe_and_fill(page, email, password, start_url="https://ww
     return login_frame
 
 
-def manual_login(account_name):
+def wait_for_login_success(page, timeout_seconds=180, interval_seconds=2, required_successes=2):
+    """等待用户完成网页登录；只使用现有登录状态检测，连续成功后返回。"""
+    deadline = time.time() + timeout_seconds
+    success_count = 0
+    print(f"\n⏳ 正在等待登录完成，最多等待 {timeout_seconds} 秒...")
+
+    while time.time() < deadline:
+        remaining = max(0, int(deadline - time.time()))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                logged_in = check_login_status(page)
+
+            if logged_in:
+                success_count += 1
+                if success_count >= required_successes:
+                    print()
+                    print("✅ 已检测到登录成功")
+                    return True
+            else:
+                success_count = 0
+        except Exception as e:
+            success_count = 0
+            msg = str(e).lower()
+            if "has been closed" in msg or ("closed" in msg and "target" in msg):
+                print()
+                print("❌ 浏览器或页面已关闭，停止等待登录")
+                return False
+
+        print(f"\r⏳ 等待登录中... 剩余 {remaining} 秒", end="", flush=True)
+        time.sleep(interval_seconds)
+
+    print()
+    print("❌ 等待登录超时，未检测到登录成功")
+    return False
+
+
+def manual_login(account_name, timeout_seconds=180, manual_save=False):
     """手动登录：打开可见浏览器。若 account.json 中有该账号凭据则自动填邮箱密码；否则仍会尝试点开顶栏「登录」。"""
     data_dir = 'account_data'
     os.makedirs(data_dir, exist_ok=True)
@@ -2522,11 +2586,11 @@ def manual_login(account_name):
     if login_email and login_password:
         print(f"   1. 已从 account_data/account.json 读取该账号邮箱与密码，将自动点击「登录」并填写")
         print("   2. 请在登录弹窗内手动拖动滑块完成人机验证，然后点击弹窗内的「登录」提交")
-        print("   3. 登录成功后，回到终端按回车键保存登录状态")
+        print("   3. 登录成功后脚本会自动保存登录状态并关闭浏览器")
     else:
         print("   1. 未在 account_data/account.json 中找到该账号凭据：仍会尝试自动点击顶栏「登录」")
         print("   2. 需要自动填邮箱密码时，请执行 add 写入 account.json，或手工编辑该文件")
-        print("   3. 登录成功后回到终端按回车保存；按回车前请勿关闭浏览器窗口")
+        print("   3. 登录成功后脚本会自动保存登录状态并关闭浏览器")
     print("=" * 50)
     
     browser = None
@@ -2624,7 +2688,7 @@ def manual_login(account_name):
                 print("🌐 接下来请你:")
                 print("   · 在登录弹窗内手动完成滑动验证")
                 print("   · 点击弹窗内的「登录」按钮提交")
-                print("   · 确认页面已登录（如右上角头像）后，回到终端按回车")
+                print("   · 登录成功后脚本会自动检测并保存登录态")
             else:
                 print("🌐 若已弹出登录框，请在窗口内手动输入邮箱与密码并完成验证；否则请手动点右上角「登录」")
                 print(
@@ -2632,15 +2696,18 @@ def manual_login(account_name):
                     "不是从浏览器或系统里「提取」密码。"
                 )
                 print(
-                    f"   可先执行: python main.py add {account_name} --eml <邮箱> --pwd <密码> 写入 account.json，"
+                    "   可先执行: python main.py add <邮箱> <密码> 写入 account.json，"
                     "再重新 login 即可自动填写。"
                 )
-                print("   确认已登录后，回到终端按回车保存。")
+                print("   登录成功后脚本会自动检测并保存登录态。")
             print("=" * 50)
-            print("💡 保存登录态前请勿关闭浏览器窗口。")
+            print("💡 自动保存完成前请勿关闭浏览器窗口。")
 
-            # 等待用户手动登录
-            input("\n✅ 登录成功后，请按回车键保存登录状态...")
+            if manual_save:
+                input("\n✅ 登录成功后，请按回车键保存登录状态...")
+                is_logged_in = check_login_status(page)
+            else:
+                is_logged_in = wait_for_login_success(page, timeout_seconds=timeout_seconds)
             
             # 检查页面是否还存在
             try:
@@ -2659,13 +2726,6 @@ def manual_login(account_name):
             except Exception:
                 pass
 
-            # 检查登录状态
-            try:
-                is_logged_in = check_login_status(page)
-            except Exception:
-                print("⚠️ 无法自动检测登录状态，假设用户已确认登录成功")
-                is_logged_in = True
-            
             if is_logged_in:
                 # 保存账号到列表
                 accounts_file = os.path.join(data_dir, "accounts.txt")
@@ -2716,8 +2776,8 @@ def manual_login(account_name):
         return False
 
 
-def add_account(account_name, email=None, password=None, headless=False):
-    """仅将账号邮箱与密码写入 account_data/account.json（合并更新），不打开浏览器、不尝试登录。
+def add_account(email, password=None, headless=False):
+    """仅将账号邮箱与密码写入 account_data/account.json（合并更新），账号名取邮箱 @ 前缀。
 
     headless 参数已废弃，仅为兼容旧调用保留。
     """
@@ -2725,16 +2785,20 @@ def add_account(account_name, email=None, password=None, headless=False):
     data_dir = "account_data"
     os.makedirs(data_dir, exist_ok=True)
 
-    if not (account_name or "").strip():
-        print("❌ 账号名称不能为空")
-        return False
-
     if not email or not password:
         print("❌ 邮箱和密码不能为空")
         return False
 
-    account_name = account_name.strip()
     email = email.strip()
+    if "@" not in email or email.startswith("@"):
+        print("❌ 邮箱格式不正确，无法从 @ 前缀生成账号名")
+        return False
+
+    account_name = email.split("@", 1)[0].strip()
+    if not account_name:
+        print("❌ 邮箱 @ 前缀为空，无法生成账号名")
+        return False
+
     password = str(password)
 
     path = os.path.join(data_dir, "account.json")
@@ -2754,8 +2818,8 @@ def add_account(account_name, email=None, password=None, headless=False):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
 
-    print(f"\n✅ 已将账号「{account_name}」的邮箱与密码写入 {path}")
-    print("   请执行: python main.py login <账号名> 在浏览器中完成登录（凭据从 account.json 读取）。")
+    print(f"\n✅ 已将邮箱「{email}」保存为账号「{account_name}」，并写入 {path}")
+    print(f"   请执行: python main.py login {account_name} 在浏览器中完成登录（凭据从 account.json 读取）。")
     print("   login 成功后会保存登录态并可将账号加入 accounts.txt，之后 list/run 才能包含该账号。")
     return True
 
@@ -2885,22 +2949,115 @@ def get_all_accounts():
     with open(accounts_file, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip()]
 
+
+def get_ignored_accounts():
+    """获取批量任务忽略账号列表。"""
+    data_dir = 'account_data'
+    ignored_file = os.path.join(data_dir, "ignored_accounts.txt")
+
+    if not os.path.exists(ignored_file):
+        return []
+
+    with open(ignored_file, 'r', encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def save_ignored_accounts(accounts):
+    """保存批量任务忽略账号列表。"""
+    data_dir = 'account_data'
+    os.makedirs(data_dir, exist_ok=True)
+    ignored_file = os.path.join(data_dir, "ignored_accounts.txt")
+
+    unique_accounts = []
+    for account in accounts:
+        account = (account or "").strip()
+        if account and account not in unique_accounts:
+            unique_accounts.append(account)
+
+    with open(ignored_file, 'w', encoding='utf-8') as f:
+        for account in unique_accounts:
+            f.write(f"{account}\n")
+
+
+def ignore_account(account_name):
+    """将账号加入批量任务忽略名单。"""
+    account_name = (account_name or "").strip()
+    if not account_name:
+        print("❌ 请提供要忽略的账号名称")
+        return False
+
+    accounts = get_all_accounts()
+    if accounts and account_name not in accounts:
+        print(f"⚠️ 账号 '{account_name}' 不在 accounts.txt 中，仍会加入忽略名单")
+
+    ignored_accounts = get_ignored_accounts()
+    if account_name in ignored_accounts:
+        print(f"✅ 账号 '{account_name}' 已在忽略名单中")
+        return True
+
+    ignored_accounts.append(account_name)
+    save_ignored_accounts(ignored_accounts)
+    print(f"✅ 已忽略账号 '{account_name}'，批量 run/checkin/share/coins 将跳过它")
+    return True
+
+
+def unignore_account(account_name):
+    """将账号移出批量任务忽略名单。"""
+    account_name = (account_name or "").strip()
+    if not account_name:
+        print("❌ 请提供要取消忽略的账号名称")
+        return False
+
+    ignored_accounts = get_ignored_accounts()
+    if account_name not in ignored_accounts:
+        print(f"✅ 账号 '{account_name}' 不在忽略名单中")
+        return True
+
+    ignored_accounts.remove(account_name)
+    save_ignored_accounts(ignored_accounts)
+    print(f"✅ 已取消忽略账号 '{account_name}'")
+    return True
+
+
+def list_ignored_accounts():
+    """列出批量任务忽略账号。"""
+    ignored_accounts = get_ignored_accounts()
+    if not ignored_accounts:
+        print("✅ 当前没有被忽略的账号")
+        return
+
+    print("\n📋 当前忽略的账号:")
+    for i, account in enumerate(ignored_accounts, 1):
+        print(f"  {i}. {account}")
+
+
 def auto_operations(operation_type='all', headless=True):
     """
     对所有保存的账号执行自动操作
     operation_type: 'checkin' (签到), 'share' (分享), 'all' (全部)
     """
     accounts = get_all_accounts()
+    ignored_accounts = set(get_ignored_accounts())
     
     if not accounts:
         print("❌ 未找到已保存的账号，请先使用 'add' 命令添加账号")
         return False
+
+    active_accounts = [account for account in accounts if account not in ignored_accounts]
+    skipped_accounts = [account for account in accounts if account in ignored_accounts]
+
+    if skipped_accounts:
+        print(f"⏭️ 已忽略 {len(skipped_accounts)} 个账号: {', '.join(skipped_accounts)}")
+
+    if not active_accounts:
+        print("❌ 所有账号都在忽略名单中，没有可执行的账号")
+        return False
     
-    print(f"\n➡️ 开始为 {len(accounts)} 个账号执行操作: {operation_type}")
+    print(f"\n➡️ 开始为 {len(active_accounts)} 个账号执行操作: {operation_type}")
     
     success_count = 0
-    for i, account_name in enumerate(accounts, 1):
-        print(f"\n[{i}/{len(accounts)}] 处理账号: {account_name}")
+    for i, account_name in enumerate(active_accounts, 1):
+        print(f"\n[{i}/{len(active_accounts)}] 处理账号: {account_name}")
         
         # 根据操作类型执行不同的功能
         success = False
@@ -2918,7 +3075,7 @@ def auto_operations(operation_type='all', headless=True):
         if success:
             success_count += 1
     
-    print(f"\n✅ 操作完成: {success_count}/{len(accounts)} 个账号成功")
+    print(f"\n✅ 操作完成: {success_count}/{len(active_accounts)} 个账号成功")
     
     # 执行完操作后，获取所有账号的金币数量
     print("\n🔄 正在获取所有账号的金币数量...")
@@ -2929,26 +3086,32 @@ def auto_operations(operation_type='all', headless=True):
 def show_help():
     """显示帮助信息"""
     print("\n📋 可用命令:")
-    print("  python main.py login <账号名>   - 🔐 手动登录（account.json 有凭据时自动填邮箱密码，滑块手拖）")
-    print("  python main.py add <账号名>      - 仅将邮箱密码写入 account_data/account.json（不打开浏览器）")
+    print("  python main.py login <账号名>   - 🔐 手动登录，登录成功后自动保存并退出")
+    print("  python main.py add <邮箱> <密码> - 保存邮箱密码，账号名自动取邮箱 @ 前缀")
     print("  python main.py run              - 为所有账号执行签到和分享操作")
     print("  python main.py checkin          - 仅执行签到操作")
     print("  python main.py share            - 仅执行分享操作")
     print("  python main.py coins            - 获取所有账号的金币数量")
     print("  python main.py list             - 显示所有已保存的账号")
+    print("  python main.py ignore <账号名>  - 批量任务忽略指定账号")
+    print("  python main.py unignore <账号名> - 取消忽略指定账号")
+    print("  python main.py ignored          - 显示当前忽略账号")
     print("  python main.py delete <账号名>  - 删除指定账号")
     print("  python main.py help             - 显示此帮助信息")
     print("\n选项:")
     print("  --visible                       - 使用可见浏览器（默认为隐藏模式运行）")
+    print("  --timeout <秒数>                - login 自动等待登录成功的最长时间，默认 180 秒")
+    print("  --manual-save                   - login 使用旧模式：登录后手动按回车保存")
     print("\n登录入口点不到时:")
     print("  account_data/yfsp_ui_config.json 中 login_entry_css，或环境变量 YFSP_LOGIN_ENTRY_CSS")
     print("\n💡 推荐用法:")
-    print("  1. add 写入 account.json，再 login 在浏览器中完成登录并保存状态")
+    print("  1. add <邮箱> <密码> 写入 account.json，再用邮箱 @ 前缀作为账号名 login")
     print("  2. 使用 run/checkin/share 执行自动操作")
 
 def list_accounts():
     """列出所有已保存的账号"""
     accounts = get_all_accounts()
+    ignored_accounts = set(get_ignored_accounts())
     
     if not accounts:
         print("❌ 未找到已保存的账号")
@@ -2959,6 +3122,8 @@ def list_accounts():
         # 检查账号状态文件是否存在
         state_file = os.path.join('account_data', f"{account}_storage.json")
         status = "✅ 已保存登录状态" if os.path.exists(state_file) else "❌ 未保存登录状态"
+        if account in ignored_accounts:
+            status += "，⏭️ 批量任务已忽略"
         print(f"  {i}. {account} - {status}")
 
 def get_account_coins(account_name, headless=True):
@@ -2999,13 +3164,16 @@ def get_account_coins(account_name, headless=True):
                 
                 # 导航到个人中心页面
                 print("正在导航到个人中心页面...")
-                page.goto("https://www.yfsp.tv/user/index", timeout=30000)
+                try:
+                    page.goto("https://www.yfsp.tv/user/index", timeout=30000, wait_until="domcontentloaded")
+                except Exception as e:
+                    print(f"⚠️ 导航到个人中心页面超时: {short_error(e)}，尝试继续获取金币")
                 
                 # 等待页面加载
                 try:
-                    page.wait_for_load_state("networkidle", timeout=15000)
+                    page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception as e:
-                    print(f"等待页面加载时出错: {str(e)}，继续执行")
+                    pass
                 time.sleep(3)  # 额外等待，确保JavaScript完成渲染
                 
                 # 获取金币数量
@@ -3073,6 +3241,17 @@ def get_coins_for_all_accounts(headless=True):
 
     if not accounts:
         print("❌ 没有找到任何账号")
+        return
+
+    ignored_accounts = set(get_ignored_accounts())
+    skipped_accounts = [account for account in accounts if account in ignored_accounts]
+    accounts = [account for account in accounts if account not in ignored_accounts]
+
+    if skipped_accounts:
+        print(f"⏭️ 金币统计已忽略 {len(skipped_accounts)} 个账号: {', '.join(skipped_accounts)}")
+
+    if not accounts:
+        print("❌ 所有账号都在忽略名单中，没有可统计的账号")
         return
 
     results = {}
@@ -3199,6 +3378,12 @@ def delete_account(account_name):
                     f.write(f"{acc}\n")
             print(f"✅ 已从 accounts.txt 移除: {account_name}")
 
+        ignored_accounts = get_ignored_accounts()
+        if account_name in ignored_accounts:
+            ignored_accounts.remove(account_name)
+            save_ignored_accounts(ignored_accounts)
+            print(f"✅ 已从忽略名单移除: {account_name}")
+
         return True
 
     except Exception as e:
@@ -3264,33 +3449,20 @@ def main():
     
     # 处理不同的命令
     if command == 'add':
-        if len(sys.argv) < 6:
-            print("❌ 请提供账号名称、邮箱和密码")
-            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码>")
+        if len(sys.argv) < 4:
+            print("❌ 请提供邮箱和密码")
+            print("用法: python main.py add <邮箱> <密码>")
             return
-            
-        # 解析参数
-        account_name = None
-        email = None
-        password = None
-        
-        # 第一个非选项参数应该是 command 后面的账号名称
-        if len(sys.argv) > 2 and not sys.argv[2].startswith('--'):
-            account_name = sys.argv[2]
-        
-        # 然后解析选项参数
-        for i in range(2, len(sys.argv)):
-            if sys.argv[i] == '--eml' and i + 1 < len(sys.argv):
-                email = sys.argv[i + 1]
-            elif sys.argv[i] == '--pwd' and i + 1 < len(sys.argv):
-                password = sys.argv[i + 1]
-        
-        if not account_name or not email or not password:
+
+        email = sys.argv[2]
+        password = sys.argv[3]
+
+        if not email or not password:
             print("❌ 缺少必要的参数")
-            print("用法: python main.py add <账号> --eml <邮箱> --pwd <密码>")
+            print("用法: python main.py add <邮箱> <密码>")
             return
-            
-        add_account(account_name, email, password)
+
+        add_account(email, password)
     
     elif command == 'delete':
         if len(sys.argv) < 3:
@@ -3315,15 +3487,50 @@ def main():
     
     elif command == 'list':
         list_accounts()
+
+    elif command == 'ignore':
+        if len(sys.argv) < 3:
+            print("❌ 请提供要忽略的账号名称")
+            print("用法: python main.py ignore <账号名>")
+            return
+
+        ignore_account(sys.argv[2])
+
+    elif command == 'unignore':
+        if len(sys.argv) < 3:
+            print("❌ 请提供要取消忽略的账号名称")
+            print("用法: python main.py unignore <账号名>")
+            return
+
+        unignore_account(sys.argv[2])
+
+    elif command == 'ignored':
+        list_ignored_accounts()
     
     elif command == 'login':
         if len(sys.argv) < 3:
             print("❌ 请提供账号名称")
-            print("用法: python main.py login <账号名>")
+            print("用法: python main.py login <账号名> [--timeout 秒数] [--manual-save]")
             return
         
         account_name = sys.argv[2]
-        manual_login(account_name)
+        timeout_seconds = 180
+        manual_save = '--manual-save' in sys.argv
+
+        if '--timeout' in sys.argv:
+            timeout_index = sys.argv.index('--timeout')
+            if timeout_index + 1 >= len(sys.argv):
+                print("❌ --timeout 后需要提供秒数")
+                return
+            try:
+                timeout_seconds = int(sys.argv[timeout_index + 1])
+                if timeout_seconds <= 0:
+                    raise ValueError
+            except ValueError:
+                print("❌ --timeout 必须是正整数秒数")
+                return
+
+        manual_login(account_name, timeout_seconds=timeout_seconds, manual_save=manual_save)
     
     elif command in ['help', '-h', '--help']:
         show_help()

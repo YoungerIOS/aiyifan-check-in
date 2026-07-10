@@ -29,18 +29,24 @@ playwright install chromium
 
 ## 使用方法
 
-### 添加 / 保存账号名称、邮箱、密码
+### 添加 / 保存邮箱、密码
 
-把邮箱、密码信息保存在 `account_data/account.json`
+把邮箱、密码信息保存在 `account_data/account.json`，账号名称会自动使用邮箱 `@` 前面的部分。
 
 ```bash
-python main.py add <账号名称> --eml <邮箱> --pwd <密码>
+python main.py add <邮箱> <密码>
 ```
 
 随后在浏览器里完成登录并保存状态（`login` 会从 `account.json` 读取凭据用于自动填表）：
 
 ```bash
-python main.py login <账号名称>
+python main.py login <邮箱前缀>
+```
+
+登录成功后脚本会自动检测、保存登录态并关闭浏览器；如需延长等待时间可使用：
+
+```bash
+python main.py login <邮箱@前缀> --timeout 300
 ```
 
 ### 删除账号
@@ -54,6 +60,16 @@ python main.py delete <账号名称>
 
 ```bash
 python main.py list
+```
+
+### 忽略 / 取消忽略账号
+
+如果某账号需要从批量操作中排除，可以加入忽略名单；在取消忽略前，`run`、`checkin`、`share`、`coins` 批量操作都会跳过该账号。
+
+```bash
+python main.py ignore <账号名称>
+python main.py unignore <账号名称>
+python main.py ignored
 ```
 
 ### 为所有账号执行签到和分享
@@ -96,7 +112,7 @@ python main.py help
 
 ## 数据与安全
 
-- 账号邮箱与密码保存在 `account_data/account.json`，登录态在 `*_storage.json`，账号列表在 `accounts.txt`，请妥善保管。
+- 账号邮箱与密码保存在 `account_data/account.json`，登录态在 `*_storage.json`，账号列表在 `accounts.txt`，忽略名单在 `ignored_accounts.txt`，请妥善保管。
 - 邮箱推送需配置 SMTP 信息，建议使用专用邮箱。
 
 ## 故障排查
