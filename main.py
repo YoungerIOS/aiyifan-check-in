@@ -3292,9 +3292,16 @@ def get_coins_for_all_accounts(headless=True):
             print(f"   ✅ {account_name}: {coins} 金币")
         print(f"   💰 总计: {total_coins} 金币")
     
-    # 只有在成功获取到结果时才发送邮件（且邮箱配置正确）
-    if results and EMAIL_HOST != "smtp.xx.com":
-        total_coins = sum(results.values())
+    # 检查是否需要发送邮件:
+    # 1. 有失败的账号时必须发送
+    # 2. 如果全部成功，则只有周一才发送
+    is_monday = datetime.now().weekday() == 0
+    has_failures = len(final_failed_accounts) > 0
+    should_send_email = has_failures or is_monday
+
+    # 只有在符合发送条件且邮箱配置正确时才发送邮件
+    if should_send_email and EMAIL_HOST and EMAIL_HOST != "smtp.xx.com":
+        total_coins = sum(results.values()) if results else 0
         
         # 构建主题
         subject = "爱壹帆金币统计"
