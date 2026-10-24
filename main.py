@@ -14,11 +14,43 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 import traceback
 import contextlib
 import io
+import subprocess
 
 
 def short_error(error):
     """将 Playwright 的长错误压缩成一行，避免批量任务刷屏。"""
     return str(error).splitlines()[0]
+
+
+def play_prompt_sound(sound_name="Glass"):
+    """
+    播放系统提示音（提醒用户手动滑动滑块）：
+    - macOS: 调用系统自带的 afplay 播放 /System/Library/Sounds 下的指定系统音频（默认 Glass.aiff）
+    - Windows: 调用 winsound.MessageBeep
+    - 其他: 回退到终端铃声
+    """
+    try:
+        if sys.platform == "darwin":
+            sound_file = f"/System/Library/Sounds/{sound_name}.aiff"
+            if not os.path.exists(sound_file):
+                sound_file = "/System/Library/Sounds/Ping.aiff"
+            if os.path.exists(sound_file):
+                subprocess.Popen(["afplay", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                sys.stdout.write("\a")
+                sys.stdout.flush()
+        elif sys.platform.startswith("win"):
+            import winsound
+            winsound.MessageBeep()
+        else:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+    except Exception:
+        try:
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 # 配置日志
@@ -2167,6 +2199,22 @@ def run_for_single_account(account_name, headless=False):
     return share_result and check_in_result
 
 
+def get_accounts_from_account_json(data_dir=None):
+    """从 account_data/account.json 读取所有已保存凭据的账号列表（保持文件中的原有顺序）。"""
+    if not data_dir:
+        data_dir = 'account_data'
+    db_path = os.path.join(data_dir, "account.json")
+    if os.path.exists(db_path):
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                db = json.load(f)
+            if isinstance(db, dict):
+                return list(db.keys())
+        except Exception as e:
+            logging.warning(f"读取 account.json 失败: {e}")
+    return []
+
+
 def load_account_credentials(account_name, data_dir):
     """从 account_data/account.json 读取指定账号的邮箱与密码；若无则回退到旧的 <name>_account.json。"""
     account_name = (account_name or "").strip()
@@ -2529,46 +2577,252 @@ def open_yfsp_login_iframe_and_fill(page, email, password, start_url="https://ww
     print("⏳ 正在填写账号密码…")
     login_frame.fill('input[name="Email"]', email)
     login_frame.fill('input[name="UserPass"]', password)
+
+    # 等待滑块插件初始化并把登录按钮置为 disabled 锁定暗色状态（防止在滑块加载前误触登录）
+    print("⏳ 等待滑块验证组件加载就绪…")
+    try:
+        login_frame.wait_for_selector('button.btn-login.disabled', timeout=6000, state="attached")
+        print("✅ 登录按钮已处于未验证锁定状态")
+    except Exception:
+        pass
     return login_frame
 
 
-def wait_for_login_success(page, timeout_seconds=180, interval_seconds=2, required_successes=2):
-    """等待用户完成网页登录；只使用现有登录状态检测，连续成功后返回。"""
+def _find_active_login_frame(page, preferred_frame=None):
+    """查找当前页面上处于活跃状态的登录 iframe。"""
+    if preferred_frame:
+        try:
+            if not preferred_frame.is_detached():
+                return preferred_frame
+        except Exception:
+            pass
+
+    # 1. 尝试直接从 page.frames 中通过关键特征查找
+    try:
+        for f in page.frames:
+            try:
+                if f.is_detached():
+                    continue
+                test = f.evaluate("""() => {
+                    return !!(
+                        document.querySelector('.btn-login') ||
+                        document.querySelector('#mlogin') ||
+                        document.querySelector('input[name="Email"]') ||
+                        document.querySelector('.yzm_content') ||
+                        document.querySelector('.bar1')
+                    );
+                }""")
+                if test:
+                    return f
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 2. 尝试通过 iframe 选择器查找
+    try:
+        combined = "iframe#Dn_Login_Iframe, iframe[src*='login'], iframe[src*='Login'], iframe[id*='Login'], iframe[id*='login']"
+        handle = page.query_selector(combined)
+        if handle:
+            cf = handle.content_frame()
+            if cf and not cf.is_detached():
+                return cf
+    except Exception:
+        pass
+
+    return None
+
+
+def _check_and_click_login_if_verified(login_frame):
+    """
+    检查登录 iframe 内是否已完成滑动验证。
+    严密判定逻辑：
+    必须同时满足以下条件才触发点击：
+    1. 滑块手柄与轨道必须已加载渲染（排除滑块加载前按钮尚未变暗锁定的阶段）
+    2. 登录按钮已解除 disabled 状态（明亮可点击）
+    3. 确凿的验证成功凭证：
+       - 滑块轨道文本明确出现“验证成功”字样（slideToUnlock 的 serverValidateText）
+       - 或者（隐藏验证码 AuthCode 获得后端回执 token 且 滑块手柄/进度条已被拖拽至右侧）
+    """
+    if not login_frame:
+        return False
+
+    try:
+        if login_frame.is_detached():
+            return False
+
+        # 在 iframe 执行探测和提交
+        js_res = login_frame.evaluate("""() => {
+            // 1. 检查滑块手柄与轨道、登录按钮是否都在 DOM 中
+            const handle = document.querySelector('.slide-to-unlock-handle');
+            const yzmContainer = document.querySelector('.yzm_content, .bar1, .bar, .slide-to-unlock-bg');
+            const loginBtn = document.querySelector('button.btn-login, button[type="submit"]');
+
+            if (!handle || !yzmContainer || !loginBtn) {
+                // 滑块组件尚未加载完毕，坚决不点击
+                return { verified: false, clicked: false, reason: '滑块组件尚未就绪' };
+            }
+
+            const containerText = yzmContainer.textContent ? yzmContainer.textContent.trim() : '';
+
+            // 2. 核心凭据：轨道文本明确包含“验证成功”
+            const hasSuccessText = containerText.includes('验证成功');
+
+            // 3. 辅助凭据：隐藏验证码字段 (input#AuthCode, input.yzm) 是否已经获得有效 token
+            const authCodeInput = document.querySelector('input#AuthCode, input.yzm');
+            const authCodeVal = (authCodeInput && authCodeInput.value) ? authCodeInput.value.trim() : '';
+            const hasAuthCode = authCodeVal.length > 5;
+
+            // 4. 辅助状态：滑块手柄或进度条是否已经拖动到了右端（排除初始状态）
+            const progress = document.querySelector('.slide-to-unlock-progress');
+            const progressWidth = progress ? (parseFloat(progress.style.width || progress.offsetWidth || '0')) : 0;
+            const handleLeft = handle.style.left ? parseFloat(handle.style.left) : (handle.offsetLeft || 0);
+            const sliderMovedToRight = (progressWidth > 150) || (handleLeft > 150);
+
+            // 5. 按钮状态：必须已经从暗色（disabled）变亮为可点击状态
+            const hasDisabledClass = loginBtn.classList.contains('disabled');
+            const hasDisabledAttr = loginBtn.disabled || loginBtn.hasAttribute('disabled');
+            const isBtnClickable = (!hasDisabledClass && !hasDisabledAttr);
+
+            // 严格联合判定：
+            // 必须：按钮可点击（已去除 disabled）
+            // 并且必须：轨道显示“验证成功” 或 (验证码已注入 且 滑块已拖到右边)
+            const isSliderVerified = hasSuccessText || (hasAuthCode && sliderMovedToRight);
+            const isVerified = isBtnClickable && isSliderVerified;
+
+            if (isVerified) {
+                // 同步表单字段
+                if (typeof window.beforeSubmit === 'function') {
+                    try {
+                        window.beforeSubmit();
+                    } catch (e) {}
+                }
+
+                loginBtn.click();
+
+                return {
+                    verified: true,
+                    clicked: true,
+                    reason: hasSuccessText ? '滑块轨道显示「验证成功」且登录按钮已亮起' : '验证凭据已注入且登录按钮已亮起'
+                };
+            }
+
+            return {
+                verified: false,
+                clicked: false,
+                reason: ''
+            };
+        }""")
+
+        if js_res and js_res.get('clicked'):
+            reason = js_res.get('reason', '滑动验证成功')
+            print(f"\n🎉 识别到{reason}！已自动点击「登录」按钮，正在等待登录完成...")
+
+            # 双重保险：在 Playwright 端再尝试触发一次（若元素仍存在）
+            try:
+                time.sleep(0.2)
+                btn = login_frame.locator('button.btn-login:not(.disabled), button[type="submit"]:has-text("登 录")').first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=1000)
+            except Exception:
+                pass
+
+            return True
+
+    except Exception:
+        # iframe 跳转、重载或瞬间脱离 DOM 时可能产生异常，静默忽略
+        pass
+
+    return False
+
+
+def wait_for_login_success(page, login_frame=None, timeout_seconds=180, required_successes=2, auto_click_login=True):
+    """
+    等待用户完成网页登录：
+    1. 在等待过程中持续监控滑块验证状态；一旦检测到验证成功，立即自动点击「登录」按钮。
+    2. 持续检测页面登录态，连续成功后返回 True。
+    """
     deadline = time.time() + timeout_seconds
     success_count = 0
+    login_button_clicked = False
+    click_timestamp = 0.0
+    last_status_check = 0.0
+    active_frame = login_frame
+
     print(f"\n⏳ 正在等待登录完成，最多等待 {timeout_seconds} 秒...")
+    print("   💡 提示：在弹窗中手动拖完滑块后，脚本将自动代点「登录」按钮")
 
     while time.time() < deadline:
         remaining = max(0, int(deadline - time.time()))
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                logged_in = check_login_status(page)
 
-            if logged_in:
-                success_count += 1
-                if success_count >= required_successes:
-                    print()
-                    print("✅ 已检测到登录成功")
-                    return True
-            else:
+        # 检查页面是否仍然活着
+        try:
+            _ = page.url
+        except Exception:
+            print("\n❌ 浏览器或页面已关闭，停止等待登录")
+            return False
+
+        # 1. 自动识别滑块完成并点击登录按钮
+        if auto_click_login:
+            # 如果之前点击过，但如果已过去 4 秒且 iframe 按钮变回 disabled（表示上一轮验证可能报错），重置允许再次触发
+            if login_button_clicked and (time.time() - click_timestamp > 4.0):
+                try:
+                    if active_frame and not active_frame.is_detached():
+                        is_disabled_again = active_frame.evaluate("""() => {
+                            const btn = document.querySelector('button.btn-login, button[type="submit"]');
+                            return btn && btn.classList.contains('disabled');
+                        }""")
+                        if is_disabled_again:
+                            login_button_clicked = False
+                            play_prompt_sound("Glass")
+                            print("\n🔔 [提示音] 滑块已重置，请重新拖动滑块验证！")
+                except Exception:
+                    pass
+
+            if not login_button_clicked:
+                if not active_frame or active_frame.is_detached():
+                    active_frame = _find_active_login_frame(page, login_frame)
+
+                if active_frame:
+                    if _check_and_click_login_if_verified(active_frame):
+                        login_button_clicked = True
+                        click_timestamp = time.time()
+                        time.sleep(0.8)  # 给提交请求一点处理时间
+
+        # 2. 检查主页面登录态
+        # 如果已经点击过登录按钮，每次循环都探测；如果尚未点击，每 2 秒探测一次
+        check_now = login_button_clicked or (time.time() - last_status_check >= 2.0)
+        if check_now:
+            last_status_check = time.time()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    logged_in = check_login_status(page)
+
+                if logged_in:
+                    success_count += 1
+                    if success_count >= required_successes:
+                        print()
+                        print("✅ 已检测到登录成功")
+                        return True
+                else:
+                    success_count = 0
+            except Exception as e:
                 success_count = 0
-        except Exception as e:
-            success_count = 0
-            msg = str(e).lower()
-            if "has been closed" in msg or ("closed" in msg and "target" in msg):
-                print()
-                print("❌ 浏览器或页面已关闭，停止等待登录")
-                return False
+                msg = str(e).lower()
+                if "has been closed" in msg or ("closed" in msg and "target" in msg):
+                    print()
+                    print("❌ 浏览器或页面已关闭，停止等待登录")
+                    return False
 
         print(f"\r⏳ 等待登录中... 剩余 {remaining} 秒", end="", flush=True)
-        time.sleep(interval_seconds)
+        time.sleep(0.35)
 
     print()
     print("❌ 等待登录超时，未检测到登录成功")
     return False
 
 
-def manual_login(account_name, timeout_seconds=180, manual_save=False):
+def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mode=False):
     """手动登录：打开可见浏览器。若 account.json 中有该账号凭据则自动填邮箱密码；否则仍会尝试点开顶栏「登录」。"""
     data_dir = 'account_data'
     os.makedirs(data_dir, exist_ok=True)
@@ -2626,11 +2880,21 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                 # 不设置 user_agent，使用浏览器默认值
             )
             page = context.new_page()
+            login_frame = None
+
+            # 注册对话框监听器，防止网页 alert / confirm 阻塞流程
+            def _handle_page_dialog(dialog):
+                print(f"\n⚠️ 网页弹窗提示: {dialog.message}")
+                try:
+                    dialog.accept()
+                except Exception:
+                    pass
+            page.on("dialog", _handle_page_dialog)
 
             if login_email and login_password:
                 print("\n正在打开站点并自动填写登录表单…")
                 try:
-                    open_yfsp_login_iframe_and_fill(page, login_email, login_password)
+                    login_frame = open_yfsp_login_iframe_and_fill(page, login_email, login_password)
                     print("✅ 已在登录弹窗中填写邮箱与密码")
                 except Exception as e:
                     print(f"⚠️ 自动打开登录或填写失败: {e}")
@@ -2672,6 +2936,7 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                     time.sleep(0.55)
                     if _yfsp_wait_login_iframe(page, total_timeout_ms=4500):
                         print("✅ 已检测到登录弹层，可在其中输入账号并完成验证")
+                        login_frame = _find_active_login_frame(page)
                         break
                 if not any_click:
                     print("⚠️ 自动点击未触发，请手动点击页面右上角「登录」")
@@ -2684,13 +2949,15 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                 pass
             
             print("\n" + "=" * 50)
+            play_prompt_sound("Glass")
+            print("🔔 [提示音] 滑块已就绪，请在登录弹窗中手动拖动滑块完成验证！")
             if login_email and login_password:
                 print("🌐 接下来请你:")
-                print("   · 在登录弹窗内手动完成滑动验证")
-                print("   · 点击弹窗内的「登录」按钮提交")
+                print("   · 在登录弹窗内手动拖动滑块完成人机验证")
+                print("   · ⚡ 验证成功后，脚本将自动识别并为你点击「登录」按钮！")
                 print("   · 登录成功后脚本会自动检测并保存登录态")
             else:
-                print("🌐 若已弹出登录框，请在窗口内手动输入邮箱与密码并完成验证；否则请手动点右上角「登录」")
+                print("🌐 若已弹出登录框，请在窗口内手动输入邮箱与密码并拖动滑块验证；否则请手动点右上角「登录」")
                 print(
                     "   自动填表依赖 account_data/account.json 中该账号条目（email、password），"
                     "不是从浏览器或系统里「提取」密码。"
@@ -2699,7 +2966,8 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                     "   可先执行: python main.py add <邮箱> <密码> 写入 account.json，"
                     "再重新 login 即可自动填写。"
                 )
-                print("   登录成功后脚本会自动检测并保存登录态。")
+                print("   · ⚡ 验证成功后，脚本将自动识别并为你点击「登录」按钮！")
+                print("   · 登录成功后脚本会自动检测并保存登录态。")
             print("=" * 50)
             print("💡 自动保存完成前请勿关闭浏览器窗口。")
 
@@ -2707,7 +2975,7 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                 input("\n✅ 登录成功后，请按回车键保存登录状态...")
                 is_logged_in = check_login_status(page)
             else:
-                is_logged_in = wait_for_login_success(page, timeout_seconds=timeout_seconds)
+                is_logged_in = wait_for_login_success(page, login_frame=login_frame, timeout_seconds=timeout_seconds)
             
             # 检查页面是否还存在
             try:
@@ -2754,14 +3022,16 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False):
                     print("✅ 登录状态已保存")
                 
                 browser.close()
-                print("\n🎉 手动登录完成！现在可以使用以下命令执行自动操作:")
-                print("   python main.py run        # 签到+分享")
-                print("   python main.py checkin    # 仅签到")
-                print("   python main.py share      # 仅分享")
+                if not batch_mode:
+                    print("\n🎉 手动登录完成！现在可以使用以下命令执行自动操作:")
+                    print("   python main.py run        # 签到+分享")
+                    print("   python main.py checkin    # 仅签到")
+                    print("   python main.py share      # 仅分享")
                 return True
             else:
                 print("❌ 未检测到登录成功，请确保已正确登录")
-                print("   如需重试，请重新执行: python main.py login <账号名>")
+                if not batch_mode:
+                    print("   如需重试，请重新执行: python main.py login <账号名>")
                 browser.close()
                 return False
                 
@@ -3086,7 +3356,7 @@ def auto_operations(operation_type='all', headless=True):
 def show_help():
     """显示帮助信息"""
     print("\n📋 可用命令:")
-    print("  python main.py login <账号名>   - 🔐 手动登录，登录成功后自动保存并退出")
+    print("  python main.py login <账号名> [auto] - 🔐 手动登录，加 auto 则登录该账号及后续所有账号")
     print("  python main.py add <邮箱> <密码> - 保存邮箱密码，账号名自动取邮箱 @ 前缀")
     print("  python main.py run              - 为所有账号执行签到和分享操作")
     print("  python main.py checkin          - 仅执行签到操作")
@@ -3517,10 +3787,13 @@ def main():
     elif command == 'login':
         if len(sys.argv) < 3:
             print("❌ 请提供账号名称")
-            print("用法: python main.py login <账号名> [--timeout 秒数] [--manual-save]")
+            print("用法: python main.py login <账号名> [auto] [--timeout 秒数] [--manual-save]")
             return
         
-        account_name = sys.argv[2]
+        arg2 = sys.argv[2]
+        other_args = [a.lower() for a in sys.argv[3:]]
+        is_auto = ('auto' in other_args) or ('--auto' in other_args)
+
         timeout_seconds = 180
         manual_save = '--manual-save' in sys.argv
 
@@ -3537,7 +3810,59 @@ def main():
                 print("❌ --timeout 必须是正整数秒数")
                 return
 
-        manual_login(account_name, timeout_seconds=timeout_seconds, manual_save=manual_save)
+        accounts_in_db = get_accounts_from_account_json()
+
+        if arg2.lower() in ('auto', '--auto'):
+            # 如果命令为 login auto，则从 account.json 的第一个账号开始批量登录
+            is_auto = True
+            if not accounts_in_db:
+                print("❌ account_data/account.json 中未找到任何账号凭据")
+                return
+            target_accounts = accounts_in_db
+        elif is_auto:
+            # 如果命令为 login <账号名> auto，从该账号开始一直到最后一个账号
+            account_name = arg2
+            if not accounts_in_db:
+                print("❌ account_data/account.json 中未找到任何账号凭据")
+                return
+            if account_name not in accounts_in_db:
+                print(f"❌ 账号 '{account_name}' 不在 account_data/account.json 中")
+                print(f"   account.json 中的可用账号: {', '.join(accounts_in_db)}")
+                return
+            start_index = accounts_in_db.index(account_name)
+            target_accounts = accounts_in_db[start_index:]
+        else:
+            # 单账号模式
+            target_accounts = [arg2]
+
+        if len(target_accounts) > 1:
+            total = len(target_accounts)
+            print(f"\n🚀 启动批量自动登录模式（起点账号: {target_accounts[0]}），共 {total} 个账号: {', '.join(target_accounts)}")
+            success_count = 0
+            try:
+                for idx, acc in enumerate(target_accounts, 1):
+                    print(f"\n{'=' * 60}")
+                    print(f"🔄 [{idx}/{total}] 准备登录账号: {acc}")
+                    print(f"{'=' * 60}")
+                    ok = manual_login(acc, timeout_seconds=timeout_seconds, manual_save=manual_save, batch_mode=True)
+                    if ok:
+                        success_count += 1
+                        print(f"\n✅ [{idx}/{total}] 账号 '{acc}' 登录完成！")
+                    else:
+                        print(f"\n⚠️ [{idx}/{total}] 账号 '{acc}' 未能成功登录。")
+
+                    if idx < total:
+                        next_acc = target_accounts[idx]
+                        print(f"⏳ 2 秒后自动打开下一个账号: {next_acc} ...")
+                        time.sleep(2)
+            except KeyboardInterrupt:
+                print("\n\n⏹️ 检测到中断信号，已停止批量登录。")
+
+            print(f"\n{'=' * 60}")
+            print(f"🏁 批量连续登录结束: {success_count}/{total} 个账号成功完成登录。")
+            print(f"{'=' * 60}")
+        else:
+            manual_login(target_accounts[0], timeout_seconds=timeout_seconds, manual_save=manual_save, batch_mode=False)
     
     elif command in ['help', '-h', '--help']:
         show_help()
