@@ -1365,6 +1365,31 @@ def share_video(page):
 
 
 
+def cleanup_shared_logs(max_keep=30):
+    """限制 account_data/shared 目录下的状态日志文件数量，最多保留最新的 max_keep 份。"""
+    data_dir = 'account_data'
+    shared_dir = os.path.join(data_dir, 'shared')
+    if not os.path.exists(shared_dir):
+        return
+
+    try:
+        files = [
+            f for f in os.listdir(shared_dir)
+            if f.endswith('_status.txt') and os.path.isfile(os.path.join(shared_dir, f))
+        ]
+        files.sort()  # YYYY-MM-DD_status.txt 按字母升序即按日期先后排序
+        if len(files) > max_keep:
+            to_remove = files[:-max_keep]
+            for fname in to_remove:
+                fpath = os.path.join(shared_dir, fname)
+                try:
+                    os.remove(fpath)
+                except Exception as err:
+                    logging.warning(f"删除历史日志文件失败 {fpath}: {err}")
+    except Exception as e:
+        logging.warning(f"清理 shared 状态日志失败: {e}")
+
+
 def share_account_details(account_name, status):
     """记录账号操作状态到shared目录"""
     data_dir = 'account_data'
@@ -1386,6 +1411,9 @@ def share_account_details(account_name, status):
     # 追加到文件
     with open(filename, 'a', encoding='utf-8') as f:
         f.write(line)
+
+    # 限制 shared 目录下的日志数量，最多只保留 30 份
+    cleanup_shared_logs(30)
 
 
 def check_today_status(account_name, operation_type):

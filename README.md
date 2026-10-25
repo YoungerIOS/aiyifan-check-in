@@ -144,7 +144,7 @@ python main.py coins [--visible]
   * 记录内容：邮件发送记录、SMTP 报错、系统关键异常堆栈。
 * **每日详细操作流水**：
   * 目录位置：[account_data/shared/]
-  * 每日自动生成 `YYYY-MM-DD_status.txt`，详细记录当天各账号何时成功执行了“签到”与“分享”。
+  * 每日自动生成 `YYYY-MM-DD_status.txt`，详细记录当天各账号何时成功执行了“签到”与“分享”（自动轮转清理，最多保留最近 30 份日志）。
 
 ---
 
