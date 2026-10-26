@@ -135,63 +135,103 @@ YFSP_BUILTIN_LOGIN_CSS_FALLBACKS = (
 
 
 def check_login_status(page):
-    """检查是否已登录"""
+    """
+    检查页面当前是否处于登录状态。
+    可靠性准则：必须以正向凭据为准，坚决不使用‘未见登录按钮即算登录’的负向猜测逻辑。
+    """
     try:
         print("正在检查登录状态...")
-        
-        # 首先尝试获取用户名，如果能获取非unknown的用户名，说明已登录
+
+        # 1. 如果当前在个人中心路由，优先通过个人资产/金币元素确凿判定
+        if "user" in page.url.lower():
+            user_assets = page.locator('div[title="金币"], [class*="coin"], .user-info, .user-card').first
+            if user_assets.count() > 0 and user_assets.is_visible():
+                print("✅ 个人中心检测到有效资产/用户信息，确认已登录")
+                return True
+
+        # 2. 尝试获取非 unknown 的登录用户名
         username = get_username(page)
-        if username and username != "unknown" and username != "unknown_user":
+        if username and username not in ("unknown", "unknown_user", ""):
             print(f"✅ 检测到登录用户名: {username}")
             return True
-        
-        # 尝试查找登录后才会显示的元素，例如用户头像
-        # 使用更精确的选择器避免多元素匹配
+
+        # 3. 尝试查找用户头像 / 已登录用户卡片
         user_avatar = page.locator('div.user-avatar:visible, div.avatar.logged-in, img.avatar[src*="avatar"], .user-profile:visible, [class*="avatar"]:visible').first
         if user_avatar and user_avatar.count() > 0:
             try:
                 if user_avatar.is_visible():
-                    print("✅ 检测到头像元素")
-                    # 验证是否是已登录的头像
-                    try:
-                        # 点击头像，看是否能展开用户菜单
-                        user_avatar.click(timeout=2000)
-                        time.sleep(1)
-                        
-                        # 检查是否有用户菜单元素出现
-                        user_menu = page.locator('.user-menu, .dropdown-menu, .user-dropdown').first
-                        if user_menu.count() > 0 and user_menu.is_visible():
-                            print("✅ 验证头像点击后有用户菜单显示")
-                            return True
-                    except Exception as e:
-                        print(f"❌ 验证头像时出错: {str(e)}")
-                        return False
-            except Exception as e:
-                print(f"❌ 检查头像可见性时出错: {str(e)}")
-                return False
-        
-        # 检查是否有登录按钮，如果有说明未登录
-        login_button = page.locator('button:has-text("登录"), a:has-text("登录"), [class*="login"]:visible').first
+                    print("✅ 检测到已登录头像元素")
+                    return True
+            except Exception:
+                pass
+
+        # 4. 检查是否有明确的退出登录入口（只有已登录才会出现）
+        logout_btn = page.locator('a:has-text("退出"), button:has-text("退出"), [href*="logout"]').first
+        if logout_btn and logout_btn.count() > 0 and logout_btn.is_visible():
+            print("✅ 检测到退出登录按钮，确认已登录")
+            return True
+
+        # 5. 检查明确的未登录标志（顶栏或页面上有登录/注册入口）
+        login_button = page.locator('button:has-text("登录"), a:has-text("登录"), span:has-text("登录"), div.user-block:has-text("登录"), [class*="login"]:visible').first
         if login_button and login_button.count() > 0 and login_button.is_visible():
-            print("❌ 检测到登录按钮，说明未登录")
+            print("❌ 检测到登录入口元素，当前为未登录状态")
             return False
-            
-        # 检查是否有注册按钮，如果有说明未登录
+
         register_button = page.locator('button:has-text("注册"), a:has-text("注册"), [class*="register"]:visible').first
         if register_button and register_button.count() > 0 and register_button.is_visible():
-            print("❌ 检测到注册按钮，说明未登录")
+            print("❌ 检测到注册入口元素，当前为未登录状态")
             return False
-            
-        # 如果以上检查都通过，认为已登录
-        print("✅ 未检测到登录/注册按钮，认为已登录")
-        return True
-        
+
+        # 6. 安全兜底：未找到任何有效登录凭证时，坚决判定为未登录（彻底杜绝假阳性）
+        print("❌ 未检测到有效登录凭据（无用户名、无头像、无资产数据），判定为未登录")
+        return False
+
     except Exception as e:
         msg = str(e).lower()
         if "has been closed" in msg or ("closed" in msg and "target" in msg):
-            print("❌ 页面或浏览器已关闭，无法判断登录状态（请保持浏览器打开至自动保存完成）")
+            print("❌ 页面或浏览器已关闭，无法判断登录状态")
         else:
-            print(f"❌ 检查登录状态时出错: {str(e)}")
+            print(f"❌ 检查登录状态时出错: {short_error(e)}")
+        return False
+
+
+def verify_account_session(page, timeout_ms=25000):
+    """
+    基于服务端鉴权事实严格检验当前会话（Session/Cookie）是否有效。
+    原理：
+    服务端对有效会话会正常渲染 /user/index 并返回金币/资料等用户数据；
+    若 Session 失效，服务端会重定向到首页 / 或不返回任何个人中心资产。
+    返回: True (服务端鉴权有效) / False (已失效或未登录)
+    """
+    try:
+        try:
+            page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
+        except Exception as e:
+            print(f"⚠️ 导航到个人中心超时: {short_error(e)}，尝试继续检查页面")
+
+        time.sleep(2.5)
+
+        # 1. 检查是否重定向离开了个人中心
+        if "user" not in page.url.lower():
+            return False
+
+        # 2. 检查个人中心核心资产元素或用户资料元素
+        has_assets = page.evaluate("""() => {
+            const coinEl = document.querySelector('div[title="金币"], [class*="coin"]');
+            if (coinEl && coinEl.textContent.trim().length > 0) return true;
+
+            const profileEl = document.querySelector('.user-info, .user-name, .nickname, [class*="profile"]');
+            if (profileEl && profileEl.textContent.trim().length > 0) return true;
+
+            const logoutEl = document.querySelector('a[href*="logout"], a:has-text("退出")');
+            if (logoutEl) return true;
+
+            return false;
+        }""")
+
+        return bool(has_assets)
+    except Exception as e:
+        print(f"⚠️ 会话鉴权校验发生异常: {short_error(e)}")
         return False
 
 def get_username(page):
@@ -347,522 +387,333 @@ def logout(page):
         print(f"❌ 登出失败: {str(e)}")
         return False
 
-def direct_click_sign_in_button(page):
-    """直接定位并点击签到按钮，不依赖复杂的选择器逻辑"""
+def get_current_coins(page):
+    """
+    从个人中心页面提取当前账号的金币数量，若无法获取则返回 None。
+    使用爱壹帆页面标准的 div[title='金币'] 定位器及正则提取纯数字。
+    """
     try:
-        print("尝试直接定位并点击签到按钮...")
-        
-        # 确保我们在个人中心页面
-        if "user" not in page.url and "我的" not in page.url:
-            # 尝试导航到个人中心页面
-            try:
-                print("正在导航到个人中心页面...")
-                try:
-                    page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=45000)
-                except Exception as e:
-                    print(f"⚠️ 导航打开个人中心超时: {short_error(e)}，尝试继续")
-                try:
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    pass
-                time.sleep(3)  # 额外等待确保页面加载
-            except Exception as e:
-                print(f"导航到个人中心页面失败: {str(e)}")
-                
-                # 尝试点击顶部导航栏中的"个人中心"链接
-                try:
-                    # 尝试点击顶部蓝色的"个人中心"链接
-                    personal_center = page.locator('a:has-text("个人中心")').first
-                    if personal_center.count() > 0 and personal_center.is_visible():
-                        personal_center.click()
-                        print("已点击顶部个人中心链接")
-                        time.sleep(3)
-                    else:
-                        # 尝试点击右上角头像
-                        avatar = page.locator('img.avatar, .avatar-img, .user-avatar').first
-                        if avatar.count() > 0 and avatar.is_visible():
-                            avatar.click()
-                            print("已点击右上角头像")
-                            time.sleep(3)
-                except Exception as e:
-                    print(f"尝试进入个人中心失败: {str(e)}")
-        
-        # 确认当前页面是否为个人中心
-        # print(f"当前页面URL: {page.url}")
-        print(f"当前页面标题: {page.title()}")
+        coins_el = page.locator('div[title="金币"], [class*="coin"]').first
+        if coins_el and coins_el.count() > 0 and coins_el.is_visible():
+            text = coins_el.inner_text()
+            match = re.search(r'\d+', text)
+            if match:
+                return int(match.group())
 
-        
-        # 首先检查是否已经签到过了
-        already_signed = page.evaluate('''() => {
-            const bodyText = document.body.innerText;
-            
-            // 检查是否有"已签到"、"已打卡"等文本
-            const alreadySignedTexts = ['已签到', '已打卡', '明日再来', '已完成任务'];
-            for (const text of alreadySignedTexts) {
-                if (bodyText.includes(text)) {
-                    return { signed: true, text: text };
-                }
+        # JavaScript 兜底查询
+        coins_data = page.evaluate('''() => {
+            const coinDiv = document.querySelector('div[title="金币"], [class*="coin"]');
+            if (coinDiv) {
+                return coinDiv.textContent.trim();
             }
-            
-            // 检查签到按钮的状态
-            const signArea = Array.from(document.querySelectorAll('*')).find(el => 
-                el.innerText && el.innerText.includes('每日签到') && 
-                (el.innerText.includes('已') || !el.innerText.includes('立即签到'))
-            );
-            
-            if (signArea) {
-                return { signed: true, area: '签到区域显示已完成' };
-            }
-            
-            // 检查任务列表中的签到任务状态
-            const taskItems = document.querySelectorAll('.task-item, .daily-task, .task-list-item');
-            for (const item of taskItems) {
-                if (item.innerText.includes('签到') && item.innerText.includes('已完成')) {
-                    return { signed: true, task: '签到任务已完成' };
-                }
-            }
-            
-            return { signed: false };
+            return null;
         }''')
-        
-        if already_signed.get('signed', False):
-            sign_message = already_signed.get('text', already_signed.get('area', already_signed.get('task', '已完成')))
-            print(f"✅ 检测到已经签到过了: {sign_message}")
-            return True
+        if coins_data:
+            match = re.search(r'\d+', coins_data)
+            if match:
+                return int(match.group())
+    except Exception as e:
+        print(f"⚠️ 读取当前金币数量异常: {short_error(e)}")
+    return None
+
+
+def find_sign_in_button(page):
+    """
+    在个人中心寻找当前处于高亮、可点击状态的真实签到按钮。
+    准则（方案一：彻底杜绝模版幽灵按钮）：
+    1. 严格排除任何位于弹窗模版内部的节点（.dialog, .modal, #signInModal 等）。
+    2. 严格可见性检查：通过 checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) 与 getComputedStyle 过滤透明/隐藏节点。
+    3. 文本规范化后严格全等'立即签到'，严格使用 innerText（屏幕实际渲染文本），坚决不用 textContent！
+    4. 处于未禁用状态（非 disabled、非 gray、非 aria-disabled）。
+    返回: Playwright Locator 或 None
+    """
+    try:
+        target_found = page.evaluate('''() => {
+            // 清理可能遗留的标记
+            document.querySelectorAll('[data-target-signin="true"]').forEach(el => el.removeAttribute('data-target-signin'));
             
-        # 滚动页面以确保所有元素加载
-        print("滚动页面以确保所有元素加载...")
-        for _ in range(3):  # 多次滚动确保元素加载
-            page.evaluate('''() => {
-                window.scrollTo({top: document.body.scrollHeight / 3, behavior: 'smooth'});
-            }''')
-            time.sleep(1)
-            
-            page.evaluate('''() => {
-                window.scrollTo({top: document.body.scrollHeight / 2, behavior: 'smooth'});
-            }''')
-            time.sleep(1)
-            
-            page.evaluate('''() => {
-                window.scrollTo({top: document.body.scrollHeight * 2/3, behavior: 'smooth'});
-            }''')
-            time.sleep(1)
-            
-            page.evaluate('''() => {
-                window.scrollTo({top: 0, behavior: 'smooth'});
-            }''')
-            time.sleep(1)
-        
-        # 更精确定位签到区域和签到按钮
-        print("正在精确定位签到区域和签到按钮...")
-        sign_area_info = page.evaluate('''() => {
-            // 定位所有包含"每日签到"文本的元素
-            const dailySignElements = Array.from(document.querySelectorAll('*')).filter(el => 
-                el.innerText && 
-                el.innerText.includes('每日签到') && 
-                el.offsetWidth > 0 && 
-                el.offsetHeight > 0
-            );
-            
-            if (dailySignElements.length === 0) {
-                return { found: false, reason: '未找到每日签到区域' };
-            }
-            
-            // 从找到的每日签到区域开始，向下查找3层以内的"立即签到"按钮
-            function findSignButton(element, depth = 0) {
-                if (depth > 5) return null;  // 最多搜索5层
-                
-                // 检查当前元素是否包含"立即签到"文本
-                if (element.innerText && element.innerText.trim() === '立即签到') {
-                    const rect = element.getBoundingClientRect();
-                    return {
-                        element: element,
-                        text: element.innerText.trim(),
-                        tagName: element.tagName,
-                        id: element.id,
-                        className: element.className,
-                        x: rect.left + rect.width/2,
-                        y: rect.top + rect.height/2,
-                        width: rect.width,
-                        height: rect.height
-                    };
+            const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], [class*="btn"], span, div, p'));
+            const matches = [];
+            for (const el of candidates) {
+                // 1. 严格排除弹窗与模版容器内的元素
+                if (el.closest('.dialog, .modal, .popup, [role="dialog"], #signInModal, [class*="dialog"], [class*="modal"], [class*="popup"]')) {
+                    continue;
+                }
+
+                // 2. 严格可见性校验
+                if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                if (typeof el.checkVisibility === 'function') {
+                    if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+                } else {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
                 }
                 
-                // 检查所有子元素
-                for (const child of element.children) {
-                    const result = findSignButton(child, depth + 1);
-                    if (result) return result;
+                // 3. 严格使用 innerText（屏幕实际可见文字），绝对不用 textContent
+                const cleanText = (el.innerText || '').replace(/\\s+/g, '');
+                if (cleanText === '立即签到') {
+                    const className = el.className ? String(el.className) : '';
+                    const disabled = el.hasAttribute('disabled') || 
+                                     el.getAttribute('aria-disabled') === 'true' ||
+                                     className.includes('disabled') || 
+                                     className.includes('gray') ||
+                                     className.includes('btn-disable');
+                    if (!disabled) {
+                        matches.push(el);
+                    }
                 }
-                
-                return null;
             }
-            
-            // 遍历所有"每日签到"区域，查找签到按钮
-            let signButtonInfo = null;
-            for (const area of dailySignElements) {
-                // 先查找自身
-                if (area.innerText.includes('立即签到')) {
-                    const rect = area.getBoundingClientRect();
-                    signButtonInfo = {
-                        inSelf: true,
-                        text: '立即签到',
-                        x: rect.left + rect.width/2,
-                        y: rect.top + rect.height/2,
-                        width: rect.width,
-                        height: rect.height,
-                        parentText: area.innerText
-                    };
+
+            if (matches.length === 0) return false;
+
+            // 优先选择更具按钮特征的标签或类名
+            let best = matches[0];
+            for (const el of matches) {
+                const tag = el.tagName.toLowerCase();
+                const role = el.getAttribute('role') || '';
+                const cls = el.className ? String(el.className).toLowerCase() : '';
+                if (tag === 'button' || tag === 'a' || role === 'button' || cls.includes('btn')) {
+                    best = el;
                     break;
                 }
-                
-                // 查找父元素的下一个相邻兄弟元素
-                let searchArea = area;
-                for (let i = 0; i < 3; i++) {  // 向上最多查找3层父元素
-                    if (!searchArea.parentElement) break;
-                    searchArea = searchArea.parentElement;
-                    
-                    const btn = findSignButton(searchArea);
-                    if (btn) {
-                        signButtonInfo = btn;
-                        signButtonInfo.fromParent = true;
-                        break;
-                    }
-                }
-                
-                // 如果已找到按钮，跳出循环
-                if (signButtonInfo) break;
-                
-                // 扩大搜索范围 - 查找附近的元素
-                // 获取当前区域的位置
-                const areaRect = area.getBoundingClientRect();
-                
-                // 查找在区域附近的所有元素
-                const nearbyElements = Array.from(document.elementsFromPoint(
-                    areaRect.left + areaRect.width/2,
-                    areaRect.top + areaRect.height + 50  // 向下50像素
-                ));
-                
-                // 在附近元素中查找"立即签到"按钮
-                for (const nearby of nearbyElements) {
-                    if (nearby.innerText && nearby.innerText.trim() === '立即签到') {
-                        const rect = nearby.getBoundingClientRect();
-                        signButtonInfo = {
-                            nearby: true,
-                            text: nearby.innerText,
-                            tagName: nearby.tagName,
-                            id: nearby.id,
-                            className: nearby.className,
-                            x: rect.left + rect.width/2,
-                            y: rect.top + rect.height/2,
-                            width: rect.width,
-                            height: rect.height
-                        };
-                        break;
-                    }
-                }
-                
-                if (signButtonInfo) break;
             }
-            
-            if (!signButtonInfo) {
-                // 扩大搜索范围 - 在网页范围内查找任何包含"立即签到"的元素
-                const allSignButtons = Array.from(document.querySelectorAll('*')).filter(el => 
-                    el.innerText && 
-                    el.innerText.trim() === '立即签到' && 
-                    el.offsetWidth > 0 && 
-                    el.offsetHeight > 0
-                );
-                
-                if (allSignButtons.length > 0) {
-                    const btn = allSignButtons[0];
-                    const rect = btn.getBoundingClientRect();
-                    signButtonInfo = {
-                        globalSearch: true,
-                        text: btn.innerText,
-                        tagName: btn.tagName,
-                        id: btn.id,
-                        className: btn.className,
-                        x: rect.left + rect.width/2,
-                        y: rect.top + rect.height/2,
-                        width: rect.width,
-                        height: rect.height
-                    };
-                }
-            }
-            
-            return { 
-                found: !!signButtonInfo, 
-                button: signButtonInfo,
-                areasFound: dailySignElements.length
-            };
-        }''')
-        
-        print(f"签到区域搜索结果: 找到 {sign_area_info.get('areasFound', 0)} 个相关区域")
-        
-        if sign_area_info.get('found', False):
-            button_info = sign_area_info.get('button', {})
-            print(f"找到签到按钮: {button_info.get('text', '立即签到')} ({button_info.get('tagName', 'DIV')})")
-            print(f"按钮位置: x={button_info.get('x', 0)}, y={button_info.get('y', 0)}")
 
-            # 滚动到按钮位置
-            x = button_info.get('x', 0)
-            y = button_info.get('y', 0)
+            best.setAttribute('data-target-signin', 'true');
+            return true;
+        }''')
+        if target_found:
+            loc = page.locator('[data-target-signin="true"]').first
+            if loc.count() > 0 and loc.is_visible():
+                return loc
+    except Exception as e:
+        print(f"⚠️ 查找立即签到按钮异常: {short_error(e)}")
+    return None
+
+
+def check_already_signed_in_ui(page):
+    """
+    检查个人中心主界面上是否已经呈现'已签到'状态。
+    严格排除弹窗内模版节点，严格校验真实可见性。
+    """
+    try:
+        status_info = page.evaluate('''() => {
+            const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], [class*="btn"], span, div, p'));
+            for (const el of candidates) {
+                // 排除弹窗与模版容器
+                if (el.closest('.dialog, .modal, .popup, [role="dialog"], #signInModal, [class*="dialog"], [class*="modal"], [class*="popup"]')) {
+                    continue;
+                }
+                if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                if (typeof el.checkVisibility === 'function') {
+                    if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+                } else {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                }
+
+                // 严格使用 innerText
+                const cleanText = (el.innerText || '').replace(/\\s+/g, '');
+                if (cleanText === '已签到') {
+                    return { signed: true, text: '已签到' };
+                }
+            }
+            return { signed: false };
+        }''')
+        if status_info and status_info.get('signed'):
+            return status_info.get('text', '已签到')
+        return None
+    except Exception:
+        return None
+
+
+def wait_for_sign_in_section(page, timeout_sec=15):
+    """
+    动态轮询等待个人中心单页应用(SPA)完成用户资产与签到组件的异步渲染。
+    优先级法则（方案二）：
+    1. 优先查验主界面是否已经是灰色的'已签到'。若已签到且无高亮待签按钮，直接判定此前已签/冷却中，绝不进行盲目点击。
+    2. 若未签到，且主界面明确挂载了真实可见的'立即签到'，返回待签按钮。
+    """
+    start_time = time.time()
+    
+    # 适当平滑滚动触发页面可见区域的懒加载与挂载
+    try:
+        page.evaluate("window.scrollTo(0, 300)")
+        time.sleep(0.5)
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+    while time.time() - start_time < timeout_sec:
+        already_signed_text = check_already_signed_in_ui(page)
+        btn = find_sign_in_button(page)
+        
+        # 优先判定：主界面已明确呈现'已签到'且无有效'立即签到'按钮（处于冷却中）
+        if already_signed_text and btn is None:
+            return 'already_signed', already_signed_text
             
-            # 确保按钮在可视区域内
-            print("滚动确保按钮在可视区域内...")
-            page.evaluate("(y) => { window.scrollTo(0, y - 200); }", y)
-            time.sleep(1)
-  
-            # 使用模拟真实用户的方式点击按钮
-            print(f"尝试点击坐标 ({x}, {y})...")
+        # 待签判定：主界面明确挂载了真实可点击的'立即签到'
+        if btn is not None:
+            return 'ready_to_sign', btn
             
-            # 1. 先移动到按钮附近
-            page.mouse.move(x - 10, y - 10)
-            time.sleep(0.3)
-            
-            # 2. 再移动到按钮上
-            page.mouse.move(x, y)
-            time.sleep(0.3)
-            
-            # 3. 点击按钮
-            page.mouse.click(x, y)
-            print("✅ 已点击签到按钮")
-            
-            # 等待可能出现的签到确认弹窗
+        time.sleep(1)
+        
+    return 'timeout', None
+
+
+def handle_check_in_dialog(page, timeout_sec=6):
+    """
+    处理点击'立即签到'后弹出的确认小窗口，并点击'即刻签到'。
+    爱壹帆核心签到逻辑：点击主页面的'立即签到'后会弹出小窗口，
+    用户必须点击弹窗中的'即刻签到'按钮（或 id='signInBtn'）签到才真正完成。
+    """
+    print("正在等待签到弹窗及'即刻签到'按钮...")
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        try:
+            # 1. 优先通过专用 ID 定位: #signInBtn
+            sign_in_btn = page.locator('#signInBtn:visible').first
+            if sign_in_btn.count() > 0 and sign_in_btn.is_visible():
+                print("✅ 找到弹窗确认按钮(id='signInBtn')，正在点击...")
+                sign_in_btn.scroll_into_view_if_needed()
+                time.sleep(0.3)
+                sign_in_btn.click(timeout=3000)
+                print("✅ 已点击'即刻签到'按钮")
+                time.sleep(2.5)
+                return True
+
+            # 2. 通过文本严格匹配'即刻签到'
+            instant_btn = page.locator('button, a, div[role="button"], [class*="btn"], div, span') \
+                              .filter(has_text=re.compile(r'^\s*即刻签到\s*$')) \
+                              .first
+            if instant_btn.count() > 0 and instant_btn.is_visible():
+                print("✅ 找到文本为'即刻签到'的弹窗按钮，正在点击...")
+                instant_btn.scroll_into_view_if_needed()
+                time.sleep(0.3)
+                instant_btn.click(timeout=3000)
+                print("✅ 已点击'即刻签到'按钮")
+                time.sleep(2.5)
+                return True
+
+            # 3. DOM 内部直接搜索 #signInBtn 或包含'即刻签到'的可点击元素并触发点击
+            clicked = page.evaluate('''() => {
+                const btnById = document.getElementById('signInBtn');
+                if (btnById && btnById.offsetWidth > 0 && btnById.offsetHeight > 0) {
+                    btnById.click();
+                    return 'id:signInBtn';
+                }
+                
+                const allEls = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="btn"], div, span'));
+                for (const el of allEls) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    const text = el.innerText ? el.innerText.trim() : '';
+                    if (text === '即刻签到') {
+                        el.click();
+                        return 'text:即刻签到';
+                    }
+                }
+                
+                // 4. 检查是否有弹窗容器内部的确认按钮（确定/确认）
+                const dialogs = Array.from(document.querySelectorAll('.dialog, .modal, .popup, [class*="dialog"], [class*="modal"], [class*="popup"], [role="dialog"]'))
+                                     .filter(d => d.offsetWidth > 0 && d.offsetHeight > 0);
+                for (const d of dialogs) {
+                    const buttons = Array.from(d.querySelectorAll('button, a, [role="button"], [class*="btn"], div, span'));
+                    for (const btn of buttons) {
+                        if (btn.offsetWidth === 0 || btn.offsetHeight === 0) continue;
+                        const text = btn.innerText ? btn.innerText.trim() : '';
+                        if (['确定', '确认', '即刻签到', '立即签到'].includes(text)) {
+                            btn.click();
+                            return 'dialog:' + text;
+                        }
+                    }
+                }
+                return null;
+            }''')
+            if clicked:
+                print(f"✅ 通过 JavaScript 成功点击弹窗确认按钮 ({clicked})")
+                time.sleep(2.5)
+                return True
+
+        except Exception as e:
+            pass
+
+        time.sleep(0.5)
+
+    print("⚠️ 未检测到'即刻签到'弹窗按钮，可能已直接生效或弹窗未能弹出")
+    return False
+
+
+def check_sign_in_success(page, coins_before=None):
+    """
+    基于不可伪造的客观事实验证签到是否真正成功。
+    金标准法则（方案三：以金币增加为绝对核心）：
+    在获取到 coins_before 的前提下，【金币资产真实增加】是唯一的成败铁律！
+    若金币未增加，即使页面挂着'已签到'，也绝不承认成功（杜绝把旧状态误当新成果）。
+    """
+    try:
+        time.sleep(2)
+
+        # 1. 检查金币是否已即时增加
+        coins_after = get_current_coins(page)
+        if coins_before is not None and coins_after is not None:
+            if coins_after > coins_before:
+                print(f"✅ 金币资产已真实增加：{coins_before} ➡️ {coins_after}（服务端入账铁证）")
+                return True
+
+        # 2. 若 DOM 未即时更新，刷新个人中心页面进行最终核验
+        print("当前金币尚未刷新，正在刷新个人中心页面进行最终复核...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=20000)
             time.sleep(3)
 
-            # 检查是否弹出确认对话框
-            print("检查是否弹出确认对话框...")
-            dialog_info = page.evaluate('''() => {
-                // 查找对话框或弹窗
-                const dialogs = document.querySelectorAll('.dialog, .modal, .popup, [class*="dialog"], [class*="modal"], [class*="popup"]');
-                
-                if (dialogs.length > 0) {
-                    // 找到对话框，获取其位置
-                    const dialog = dialogs[0];
-                    const rect = dialog.getBoundingClientRect();
-                    
-                    // 查找对话框中的确认按钮（通常包含"即刻签到"或类似文本）
-                    const confirmButtons = Array.from(dialog.querySelectorAll('*')).filter(el => 
-                        el.innerText && (
-                            el.innerText.includes('即刻签到') || 
-                            el.innerText.includes('立即签到') ||
-                            el.innerText.includes('确定') ||
-                            el.innerText.includes('确认')
-                        ) && el.offsetWidth > 0 && el.offsetHeight > 0
-                    );
-                    
-                    let confirmButton = null;
-                    if (confirmButtons.length > 0) {
-                        const btn = confirmButtons[0];
-                        const btnRect = btn.getBoundingClientRect();
-                        confirmButton = {
-                            text: btn.innerText,
-                            tagName: btn.tagName,
-                            id: btn.id,
-                            className: btn.className,
-                            x: btnRect.left + btnRect.width/2,
-                            y: btnRect.top + btnRect.height/2
-                        };
-                    }
-                    
-                    return {
-                        found: true,
-                        dialogContent: dialog.innerText,
-                        x: rect.left + rect.width/2,
-                        y: rect.top + rect.height/2,
-                        confirmButton: confirmButton
-                    };
-                }
-                
-                return { found: false };
-            }''')
-            
-            if dialog_info.get('found', False):
-                print("✅ 找到确认对话框")
-                # print(f"对话框内容: {dialog_info.get('dialogContent', '')[:100]}...")
-                
-                confirm_button = dialog_info.get('confirmButton')
-                if confirm_button:
-                    print(f"找到确认按钮: {confirm_button.get('text', '')}")
-                    
-                    # 点击确认按钮
-                    x = confirm_button.get('x', 0)
-                    y = confirm_button.get('y', 0)
-                    
-                    # 移动到按钮位置并点击
-                    page.mouse.move(x, y)
-                    time.sleep(0.3)
-                    page.mouse.click(x, y)
-                    print("✅ 已点击确认按钮")
-                else:
-                    # 如果没有找到具体的确认按钮，点击对话框中间位置
-                    x = dialog_info.get('x', 0)
-                    y = dialog_info.get('y', 0)
-                    page.mouse.click(x, y)
-                    print("✅ 已点击对话框中间位置")
-                
-                # 等待签到完成
-                time.sleep(3)
-
-                # 检查签到是否成功
-                if check_sign_in_success(page):
+            coins_after_reload = get_current_coins(page)
+            if coins_before is not None and coins_after_reload is not None:
+                if coins_after_reload > coins_before:
+                    print(f"✅ 刷新后确认金币增加：{coins_before} ➡️ {coins_after_reload}（服务端入账铁证）")
                     return True
-                
-                # 即使检测不到明确的成功标志，也认为签到成功
-                print("未检测到明确的成功标志，但已完成确认点击，假定签到成功")
-                return True
-            else:
-                print("⚠️ 未检测到确认对话框")
-                
-                # 尝试定位页面上可能存在的"即刻签到"按钮
-                instant_sign_button = page.evaluate('''() => {
-                    const buttons = Array.from(document.querySelectorAll('*')).filter(el => 
-                        el.innerText && 
-                        (el.innerText.includes('即刻签到') || el.innerText.includes('立即签到')) && 
-                        el.offsetWidth > 0 && 
-                        el.offsetHeight > 0
-                    );
-                    
-                    if (buttons.length > 0) {
-                        const btn = buttons[0];
-                        const rect = btn.getBoundingClientRect();
-                        return {
-                            found: true,
-                            text: btn.innerText,
-                            tagName: btn.tagName,
-                            id: btn.id,
-                            className: btn.className,
-                            x: rect.left + rect.width/2,
-                            y: rect.top + rect.height/2
-                        };
-                    }
-                    
-                    return { found: false };
-                }''')
-                
-                if instant_sign_button.get('found', False):
-                    print(f"找到'即刻签到'按钮: {instant_sign_button.get('text', '')}")
-                    
-                    # 点击"即刻签到"按钮
-                    x = instant_sign_button.get('x', 0)
-                    y = instant_sign_button.get('y', 0)
-                    
-                    # 移动到按钮位置并点击
-                    page.mouse.move(x, y)
-                    time.sleep(0.3)
-                    page.mouse.click(x, y)
-                    print("✅ 已点击'即刻签到'按钮")
-                    
-                    # 等待签到完成
-                    time.sleep(3)
-
-                    # 检查签到是否成功
-                    if check_sign_in_success(page):
-                        return True
                 else:
-                    print("❌ 未找到'即刻签到'按钮")
-                
-                # 检查签到是否成功
-                if check_sign_in_success(page):
-                    return True
-            
-            # 如果无法确认签到成功，但已尝试点击，返回False
-            print("⚠️ 已尝试点击签到按钮，但无法确认是否成功")
-            return False
-        else:
-            print("❌ 未找到签到按钮")
-            return False
-    except Exception as e:
-        print(f"直接点击签到按钮过程中出错: {str(e)}")
-        traceback.print_exc()
-        return False
+                    print(f"❌ 刷新后金币未发生增加：{coins_before} ➡️ {coins_after_reload}，服务端未给予入账（签到未生效）")
+                    return False
+        except Exception as e:
+            print(f"⚠️ 刷新页面复核出错: {short_error(e)}")
 
-def check_sign_in_success(page):
-    """检查签到是否成功"""
-    print("检查签到是否成功...")
-    try:
-        
-        # 方法一：查找页面上的签到成功/已签到提示文本
-        try:
-            success_text = page.evaluate('''() => {
-                // 检查常见的成功提示文本
-                const successTexts = [
-                    '签到成功', '已签到'
-                ];
-                
-                const bodyText = document.body.innerText;
-                for (const text of successTexts) {
-                    if (bodyText.includes(text)) {
-                        return { found: true, text: text };
-                    }
-                }
-                
-                // 检查签到区域是否变化（立即签到按钮变成已签到状态）
-                const elements = Array.from(document.querySelectorAll('.task-item, .daily-task-item, .task-list-item, [class*="task"], [class*="sign"], [class*="check-in"]'));
-                for (const el of elements) {
-                    // 如果元素内容包含"签到"并且包含"已"或"完成"
-                    if (el.innerText.includes('签到') && 
-                        (el.innerText.includes('已') || 
-                         el.innerText.includes('完成') || 
-                         el.innerText.includes('明日') || 
-                         el.innerText.includes('明天'))) {
-                        return { found: true, text: '任务状态变为已完成' };
-                    }
-                }
-                
-                return { found: false };
-            }''')
-            
-            if success_text.get('found', False):
-                print(f"✅ 找到成功提示: {success_text.get('text', '')}")
+        # 3. 仅在未成功读取 coins_before 的极罕见异常兜底下，才辅助参考 UI 翻转
+        if coins_before is None:
+            if check_already_signed_in_ui(page) and find_sign_in_button(page) is None:
+                print("⚠️ 无法获取基准金币数，仅通过按钮翻转为'已签到'降级判定为完成")
                 return True
-        except Exception as e:
-            print(f"检查成功文本时出错: {str(e)}")
-         
-        
-        # 方法四：检查签到按钮是否消失
-        try:
-            button_check = page.evaluate('''() => {
-                // 检查"立即签到"按钮是否还存在
-                const signButtons = Array.from(document.querySelectorAll('*')).filter(el => 
-                    el.innerText && el.innerText.trim() === '立即签到' && el.offsetWidth > 0
-                );
-                
-                // 如果按钮消失了，可能是因为已经签到成功
-                if (signButtons.length === 0) {
-                    // 但要确保页面上有"已签到"或相关文本
-                    const bodyText = document.body.innerText;
-                    if (bodyText.includes('已签到') || 
-                        bodyText.includes('明日再来') || 
-                        bodyText.includes('已完成')) {
-                        return { found: true, reason: '签到按钮消失且有已签到标记' };
-                    }
-                }
-                
-                return { found: false };
-            }''')
-            
-            if button_check.get('found', False):
-                print(f"✅ {button_check.get('reason', '签到状态已更新')}")
-                return True
-        except Exception as e:
-            print(f"检查按钮状态时出错: {str(e)}")
-        
-        
-        # 如果所有方法都没有明确的成功迹象，返回False
-        print("⚠️ 未检测到明确的签到成功迹象")
+
+        print("❌ 未检测到确凿的金币增加入账证据，签到未成功")
         return False
     except Exception as e:
-        print(f"签到成功检查过程中出错: {str(e)}")
+        print(f"❌ 签到成功核验过程中出错: {short_error(e)}")
         return False
+
+
+def direct_click_sign_in_button(page):
+    """兼容旧接口：定位并点击签到按钮"""
+    btn = find_sign_in_button(page)
+    if btn:
+        btn.click()
+        handle_check_in_dialog(page)
+        return True
+    return False
+
 
 
 def share_video(page):
-    """在网站上分享视频"""
+    """在网站上分享视频（点击分享按钮唤起小窗，点击社交平台图标打开新标签页完成任务）"""
     try:
         print("\n===== 开始分享视频 =====")
         
+        # 监听浏览器打开的新标签页（点击分享图标会触发 target="_blank" 或 window.open）
+        opened_tabs = []
+        def _on_new_page(new_tab):
+            opened_tabs.append(new_tab)
+        try:
+            page.context.on("page", _on_new_page)
+        except Exception:
+            pass
+
         # 导航到动漫列表页面，而不是首页
         print("正在导航到动漫列表页面...")
         page.goto("https://www.yfsp.tv/list/anime?orderBy=1", timeout=45000, wait_until="domcontentloaded")
@@ -1031,331 +882,233 @@ def share_video(page):
             print(f"⚠️ 等待页面加载超时，继续执行: {short_error(e)}")
         time.sleep(3)  # 额外等待
 
-        
-        # 直接定位具体的分享按钮元素 - 根据提供的截图使用精确的选择器
+        # 稍微平滑下滚，确保播放器下方的工具栏（收藏、点赞、分享）完整渲染并在视口内
+        try:
+            page.evaluate("window.scrollBy(0, 350)")
+            time.sleep(1)
+        except Exception:
+            pass
+
         print("\n开始精确定位分享按钮...")
-        
-        # 记录是否找到并点击了分享按钮
-        share_button_clicked = False
-        
-        # 方法1: 使用按钮属性直接定位
+
+        # 1. 查找主分享触发按钮（播放器下方的节点状分享图标，悬停显示“分享”）
+        share_btn = None
+        selectors = [
+            'button[title="分享"]',
+            '[title="分享"]',
+            'button[aria-label="分享"]',
+            '[aria-label="分享"]',
+            '[data-title="分享"]',
+            '[data-tooltip="分享"]',
+            '.iconfont.iconfenxiang',
+            '[class*="iconfenxiang"]',
+            '[class*="icon-fenxiang"]',
+            '[class*="icon-share"]',
+            'div[class*="share-btn"]',
+            'div[class*="share"]:has(.iconfont)',
+            'div[class*="share"]:has(svg)',
+            'button:has-text("分享")',
+            '[role="button"]:has-text("分享")',
+        ]
+        for sel in selectors:
+            loc = page.locator(f"{sel}:visible").first
+            if loc.count() > 0 and loc.is_visible():
+                share_btn = loc
+                print(f"找到节点状分享图标按钮: {sel}")
+                break
+
+        if not share_btn:
+            # JS 兜底定位：查找 title/aria-label/class 为分享的图标或按钮
+            js_found = page.evaluate('''() => {
+                const els = Array.from(document.querySelectorAll('button, a, div[role="button"], span, div, i, svg'));
+                for (const el of els) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    const aria = (el.getAttribute('aria-label') || '').trim();
+                    const title = (el.getAttribute('title') || '').trim();
+                    const dataTitle = (el.getAttribute('data-title') || el.getAttribute('data-tooltip') || '').trim();
+                    const cls = el.className ? String(el.className) : '';
+                    if (aria === '分享' || title === '分享' || dataTitle === '分享' || cls.includes('iconfenxiang') || cls.includes('icon-share')) {
+                        const target = el.closest('button, [role="button"], a') || el;
+                        target.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        return true;
+                    }
+                }
+                return false;
+            }''')
+            if js_found:
+                share_btn = page.locator('button[title="分享"], [title="分享"], button[aria-label="分享"], [aria-label="分享"], .iconfont.iconfenxiang, [class*="iconfenxiang"]').first
+
+        if not share_btn or share_btn.count() == 0:
+            print("❌ 未能定位到任何分享主按钮，分享失败")
+            return False
+
+        # 2. 点击'分享'主按钮唤起弹出的小窗
+        print("正在点击'分享'按钮唤起分享小窗...")
         try:
-            # 使用显式的等待，确保页面上有按钮元素
-            page.wait_for_selector('button', timeout=5000)
-            
-            # 使用提供的截图HTML中的准确属性选择器
-            share_button = page.locator('button[aria-label="分享"]').first
-            if share_button.count() > 0:
+            share_btn.scroll_into_view_if_needed()
+            time.sleep(0.5)
+            share_btn.highlight()
+            time.sleep(0.3)
+            share_btn.click(force=True)
+            print("✅ 已点击'分享'按钮")
+        except Exception as e:
+            print(f"⚠️ 点击分享按钮异常: {short_error(e)}，尝试通过JS点击")
+            try:
+                page.evaluate("(el) => el.click()", share_btn.element_handle())
+            except Exception as e2:
+                print(f"❌ JS点击依然失败: {short_error(e2)}")
+                return False
+
+        # 等待小窗弹出与动画完成
+        print("正在等待分享小窗及平台图标加载...")
+        time.sleep(2)
+
+        # 3. 在弹出的分享小窗中寻找真实的社交平台分享图标（微博 / QQ / 微信 / Facebook / X / Telegram）
+        print("正在小窗中定位真实的分享平台图标（微博 / QQ / 微信 / Facebook / X / Telegram）...")
+
+        # 从小窗中提取真实的目标平台图标候选（严格限制在确认的 6 个平台内，彻底杜绝误判）
+        candidates = page.evaluate('''() => {
+            const dialogs = Array.from(document.querySelectorAll(
+                '.dialog, .modal, .popup, [role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"], [class*="share"], .popover'
+            )).filter(el => {
+                if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
+                if (el.querySelector('video') || el.classList.contains('player')) return false;
+                const s = window.getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+            });
+
+            // 确认为爱壹帆网站分享小窗内的 6 大官方平台
+            const platformDefs = [
+                { key: 'weibo', name: '微博', matches: (s, t, c) => s.includes('weibo') || s.includes('微博') },
+                { key: 'qq', name: 'QQ', matches: (s, t, c) => s.includes('qq') || s.includes('qzone') || s.includes('connect.qq') },
+                { key: 'wechat', name: '微信', matches: (s, t, c) => s.includes('wechat') || s.includes('weixin') || s.includes('微信') },
+                { key: 'facebook', name: 'Facebook', matches: (s, t, c) => s.includes('facebook') || c.includes('icon-fb') || c.includes('share-fb') },
+                { key: 'x', name: 'X', matches: (s, t, c) => s.includes('twitter') || s.includes('x.com') || s.includes('推特') || s.includes('分享到x') || t === 'x' || c.includes('icon-x') },
+                { key: 'telegram', name: 'Telegram', matches: (s, t, c) => s.includes('telegram') || s.includes('t.me') || s.includes('电报') }
+            ];
+
+            const badWords = ['二维码', '立刻观看', '海量', '评分', '暂无评分', '关闭', 'close', '×', '看《', '快来和我', '万', '分', '免费在线观看'];
+
+            const list = [];
+            for (const d of dialogs) {
+                const items = Array.from(d.querySelectorAll('a, button, [role="button"], [class*="icon"], img, svg, div, span'));
+                for (const item of items) {
+                    if (item.offsetWidth === 0 || item.offsetHeight === 0) continue;
+                    const text = (item.innerText || item.textContent || '').trim();
+                    if (text.length > 25) continue;
+                    if (badWords.some(b => text.includes(b))) continue;
+
+                    const href = (item.getAttribute('href') || '').toLowerCase();
+                    const cls = (item.className ? String(item.className) : '').toLowerCase();
+                    const title = (item.getAttribute('title') || '').toLowerCase();
+                    const aria = (item.getAttribute('aria-label') || '').toLowerCase();
+                    const alt = (item.getAttribute('alt') || '').toLowerCase();
+
+                    if (badWords.some(b => cls.includes(b) || aria.includes(b) || title.includes(b))) continue;
+
+                    const combined = (title + ' ' + aria + ' ' + alt + ' ' + href + ' ' + cls + ' ' + text).toLowerCase();
+                    const t = text.toLowerCase();
+
+                    for (const p of platformDefs) {
+                        if (p.matches(combined, t, cls)) {
+                            const target = item.closest('a, button, [role="button"]') || item;
+                            target.setAttribute('data-target-share-platform', p.key);
+                            list.push({
+                                key: p.key,
+                                name: p.name,
+                                displayName: title || aria || text || p.name,
+                                href: target.getAttribute('href') || '',
+                                hasHref: Boolean(target.getAttribute('href') && target.getAttribute('href') !== '#' && target.getAttribute('href') !== 'javascript:;')
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 按 platform key 去重，确保每个平台至多一个独立候选
+            const res = [];
+            const seen = new Set();
+            for (const item of list) {
+                if (!seen.has(item.key)) {
+                    seen.add(item.key);
+                    res.push(item);
+                }
+            }
+
+            // 优先点击通常会打开独立网页的平台 (QQ, Facebook, Telegram, Weibo, X)，微信常为弹内二维码放在后备
+            const priority = { 'qq': 10, 'facebook': 9, 'telegram': 8, 'weibo': 7, 'x': 6, 'wechat': 1 };
+            res.sort((a, b) => {
+                if (a.hasHref !== b.hasHref) return (b.hasHref ? 1 : 0) - (a.hasHref ? 1 : 0);
+                return (priority[b.key] || 0) - (priority[a.key] || 0);
+            });
+            return res;
+        }''')
+
+        print(f"小窗内检测到 {len(candidates)} 个候选平台图标: {[c['displayName'] for c in candidates]}")
+        if not candidates:
+            print("❌ 未能在分享小窗中找到任何合法的平台分享图标，分享失败")
+            return False
+
+        # 4. 逐个尝试点击候选图标，直到确凿打开目标平台新标签页
+        new_tab_detected = False
+        tab_url = ""
+
+        for idx, cand in enumerate(candidates):
+            print(f"正在点击分享平台图标 [{idx+1}/{len(candidates)}]: '{cand['displayName']}'({cand['name']})...")
+            tabs_before_count = len(opened_tabs)
+
+            # 通过绑定的 data-target-share-platform 属性精准点击
+            clicked = page.evaluate('''(key) => {
+                const el = document.querySelector(`[data-target-share-platform="${key}"]`);
+                if (el) {
+                    const target = el.closest('a, button, [role="button"]') || el;
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    target.click();
+                    return true;
+                }
+                return false;
+            }''', cand['key'])
+
+            if not clicked:
                 try:
-                    # 确保按钮可见且可点击
-                    if share_button.is_visible():
-                        print("找到aria-label为'分享'的按钮")
-                        
-                        # 滚动到按钮位置
-                        share_button.scroll_into_view_if_needed()
-                        time.sleep(1)
-                        
-                        # 高亮并直接点击
-                        share_button.highlight()
-                        time.sleep(1)
-                        share_button.click(force=True)
-                        print("已点击分享按钮")
-                        share_button_clicked = True
-                        time.sleep(2)
-                except Exception as e:
-                    print(f"点击分享按钮(aria-label)时出错: {str(e)}")
-        except Exception as e:
-            print(f"查找aria-label为'分享'的按钮时出错: {str(e)}")
-        
-        # 方法2: 使用类名精确定位分享按钮
-        if not share_button_clicked:
-            try:
-                # 先检查是否存在包含"分享"文本的按钮
-                text_share = page.locator('button:has-text("分享"), span:has-text("分享")').first
-                if text_share.count() > 0 and text_share.is_visible():
-                    print("找到包含'分享'文本的元素")
-                    
-                    # 高亮并点击
-                    text_share.highlight()
-                    time.sleep(1)
-                    text_share.click(force=True)
-                    print("已点击包含'分享'文本的元素")
-                    share_button_clicked = True
-                    time.sleep(2)
-            except Exception as e:
-                print(f"查找包含'分享'文本的元素时出错: {str(e)}")
-        
-        # 方法3: 使用精确的CSS选择器结构
-        if not share_button_clicked:
-            try:
-                # 尝试根据截图中的HTML结构定位
-                # 首先查找分享图标
-                share_icon = page.locator('.iconfont.iconfenxiang, div[class*="share"], i[class*="share"]').first
-                if share_icon.count() > 0 and share_icon.is_visible():
-                    print("找到分享图标")
-                    
-                    # 高亮并点击
-                    share_icon.highlight()
-                    time.sleep(1)
-                    share_icon.click(force=True)
-                    print("已点击分享图标")
-                    share_button_clicked = True
-                    time.sleep(2)
-                    
-                    # 或者点击其父元素
-                    if not share_button_clicked:
-                        try:
-                            # 使用JavaScript获取图标的父级按钮元素
-                            page.evaluate('''() => {
-                                const icon = document.querySelector('.iconfont.iconfenxiang, div[class*="share"], i[class*="share"]');
-                                if (icon) {
-                                    // 查找父级按钮元素
-                                    let parent = icon.parentElement;
-                                    while (parent && parent.tagName !== 'BUTTON') {
-                                        parent = parent.parentElement;
-                                    }
-                                    
-                                    if (parent) {
-                                        parent.click();
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            }''')
-                            print("已通过JavaScript点击分享图标的父级按钮")
-                            share_button_clicked = True
-                            time.sleep(2)
-                        except Exception as e:
-                            print(f"通过JavaScript点击分享图标父级按钮时出错: {str(e)}")
-            except Exception as e:
-                print(f"查找分享图标时出错: {str(e)}")
-        
-        # 方法4: 使用截图中显示的类名组合
-        if not share_button_clicked:
-            try:
-                # 查找分享框元素
-                share_box = page.locator('div.hovered-share-box, div[class*="share-box"]').first
-                if share_box.count() > 0 and share_box.is_visible():
-                    print("找到分享框元素")
-                    
-                    # 高亮并点击
-                    share_box.highlight()
-                    time.sleep(1)
-                    share_box.click(force=True)
-                    print("已点击分享框")
-                    share_button_clicked = True
-                    time.sleep(2)
-            except Exception as e:
-                print(f"查找分享框时出错: {str(e)}")
-        
-        # 方法5: 使用JavaScript精确定位按钮
-        if not share_button_clicked:
-            try:
-                print("尝试使用JavaScript精确查找分享按钮...")
-                
-                found_button = page.evaluate('''() => {
-                    // 所有可能的按钮
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    console.log(`找到 ${buttons.length} 个按钮`);
-                    
-                    // 检查每个按钮的属性
-                    for (const button of buttons) {
-                        // 记录每个按钮的特征
-                        const ariaLabel = button.getAttribute('aria-label');
-                        const title = button.getAttribute('title');
-                        const text = button.textContent.trim();
-                        const classes = button.className;
-                        
-                        console.log(`按钮: aria-label=${ariaLabel}, title=${title}, text=${text}, class=${classes}`);
-                        
-                        // 检查是否为分享按钮
-                        if (ariaLabel === '分享' || title === '分享' || text === '分享' || 
-                            classes.includes('share') || classes.includes('分享')) {
-                            
-                            // 记录按钮位置
-                            const rect = button.getBoundingClientRect();
-                            console.log(`找到分享按钮! 位置: x=${rect.x}, y=${rect.y}, 宽=${rect.width}, 高=${rect.height}`);
-                            
-                            // 确保按钮在视口内
-                            button.scrollIntoView({behavior: 'smooth', block: 'center'});
-                            
-                            // 延迟点击
-                            setTimeout(() => {
-                                button.click();
-                                console.log('已点击分享按钮');
-                            }, 500);
-                            
-                            return {
-                                found: true,
-                                x: rect.x,
-                                y: rect.y,
-                                width: rect.width,
-                                height: rect.height
-                            };
-                        }
-                    }
-                    
-                    // 查找所有带有分享相关类名的元素
-                    const shareElements = Array.from(document.querySelectorAll('[class*="share"], [class*="分享"], .iconfont.iconfenxiang'));
-                    console.log(`找到 ${shareElements.length} 个可能的分享元素`);
-                    
-                    if (shareElements.length > 0) {
-                        const element = shareElements[0];
-                        const rect = element.getBoundingClientRect();
-                        
-                        // 确保元素在视口内
-                        element.scrollIntoView({behavior: 'smooth', block: 'center'});
-                        
-                        // 延迟点击
-                        setTimeout(() => {
-                            element.click();
-                            console.log('已点击分享元素');
-                        }, 500);
-                        
-                        return {
-                            found: true,
-                            x: rect.x,
-                            y: rect.y,
-                            width: rect.width,
-                            height: rect.height
-                        };
-                    }
-                    
-                    return { found: false };
-                }''')
-                
-                if found_button and found_button.get('found', False):
-                    print(f"通过JavaScript找到分享按钮，位置: x={found_button.get('x')}, y={found_button.get('y')}")
-                    share_button_clicked = True
-                    time.sleep(2)
-            except Exception as e:
-                print(f"使用JavaScript查找分享按钮时出错: {str(e)}")
+                    loc = page.locator(f'[data-target-share-platform="{cand["key"]}"]').first
+                    if loc.count() > 0:
+                        loc.click(force=True, timeout=3000)
+                        clicked = True
+                except Exception:
+                    pass
 
-        
-        # 检查是否点击了分享按钮
-        if share_button_clicked:
-            print("✅ 已成功点击分享按钮，正在等待分享对话框...")
-            
-            # 等待分享对话框出现
-            time.sleep(2)
-            
-            # 检查并点击分享对话框中的选项
-            try:
-                # 尝试找到分享对话框元素
-                share_dialog = page.locator('div.share-dialog, div[class*="share-dialog"], div[class*="sharing"], div.dialog, .modal-content').first
-                if share_dialog.count() > 0 and share_dialog.is_visible():
-                    print("找到分享对话框元素")
-                    
-                    # 尝试查找对话框中的分享选项
-                    share_options = share_dialog.locator('button, a, div[role="button"], span[role="button"]').all()
-                    if share_options and len(share_options) > 0:
-                        print(f"在分享对话框中找到 {len(share_options)} 个选项")
-                        
-                        # 默认选择第一个选项
-                        share_option = share_options[0]
-                        
-                        # 首先尝试查找特定的分享平台选项
-                        for option in share_options:
-                            try:
-                                option_text = option.text_content().strip()
-                                if "telegram" in option_text.lower() or "微信" in option_text or "微博" in option_text:
-                                    share_option = option
-                                    print(f"选择分享到平台: {option_text}")
-                                    break
-                            except:
-                                continue
-                        
-                        # 点击选定的分享选项
-                        try:
-                            share_option.highlight()
-                            time.sleep(1)
-                            share_option.click(force=True)
-                            print(f"已点击分享对话框中的选项: {share_option.text_content().strip()}")
-                            time.sleep(2)
-                                
-                            print("✅ 完成分享视频操作!")
-                            return True
-                        except Exception as e:
-                            print(f"点击分享选项时出错: {str(e)}")
-                else:
-                    print("未找到分享对话框元素，尝试通过JavaScript查找和点击")
-                    
-                    # 使用JavaScript查找和点击分享对话框中的选项
-                    clicked_option = page.evaluate('''() => {
-                        // 查找所有可能的分享对话框容器
-                        const dialogs = document.querySelectorAll('div[class*="dialog"], div[class*="modal"], div[class*="share"], div[class*="popup"]');
-                        console.log(`找到 ${dialogs.length} 个可能的对话框`);
-                        
-                        if (dialogs.length > 0) {
-                            // 查找对话框中的所有可点击元素
-                            const clickableElements = Array.from(dialogs[0].querySelectorAll('a, button, [role="button"], [class*="option"]'));
-                            console.log(`在对话框中找到 ${clickableElements.length} 个可点击元素`);
-                            
-                            if (clickableElements.length > 0) {
-                                // 优先选择特定平台
-                                let targetElement = clickableElements[0]; // 默认第一个
-                                
-                                for (const el of clickableElements) {
-                                    const text = el.textContent.toLowerCase();
-                                    if (text.includes('telegram') || text.includes('微信') || text.includes('微博')) {
-                                        targetElement = el;
-                                        console.log(`选择分享到平台: ${text}`);
-                                        break;
-                                    }
-                                }
-                                
-                                // 点击选定的元素
-                                targetElement.click();
-                                console.log(`已点击分享选项: ${targetElement.textContent}`);
-                                return {
-                                    clicked: true,
-                                    text: targetElement.textContent.trim()
-                                };
-                            }
-                        }
-                        
-                        return { clicked: false };
-                    }''')
-                    
-                    if clicked_option and clicked_option.get('clicked', False):
-                        print(f"通过JavaScript成功点击分享选项: {clicked_option.get('text')}")
-                        time.sleep(2)
-                        print("✅ 完成分享视频操作!")
-                        return True
-            except Exception as e:
-                print(f"处理分享对话框时出错: {str(e)}")
-        
-        # 如果前面的方法都失败，尝试使用更暴力的方法
-        print("尝试使用模拟按键和坐标点击方法...")
-        
-        # 方法1: 尝试按Tab键选择分享按钮并按Enter确认
-        try:
-            # 先按几次Tab键，希望能选中分享按钮
-            page.keyboard.press("Tab")
-            time.sleep(0.5)
-            page.keyboard.press("Tab")
-            time.sleep(0.5)
-            page.keyboard.press("Tab")
-            time.sleep(0.5)
-            
-            # 尝试按Enter确认
-            page.keyboard.press("Enter")
-            print("已尝试通过键盘Tab+Enter模拟点击分享按钮")
-            time.sleep(2)
+            # 等待最多 3 秒检测是否有目标平台新标签页打开
+            for _ in range(6):
+                if len(opened_tabs) > tabs_before_count:
+                    new_tab_detected = True
+                    break
+                time.sleep(0.5)
 
-                
-            # 再次尝试点击对话框中的第一个选项
-            try:
-                page.keyboard.press("Enter")
-                print("已尝试通过键盘Enter点击分享对话框中的选项")
-                time.sleep(2)
-            except:
-                pass
-        except Exception as e:
-            print(f"键盘模拟点击时出错: {str(e)}")
-        
-        # 假定分享成功
-        print("✅ 分享流程已尝试完成")
+            if new_tab_detected:
+                opened_tab = opened_tabs[-1]
+                try:
+                    tab_url = opened_tab.url
+                except Exception:
+                    pass
+                print(f"✅ 成功打开目标平台标签页: {tab_url or cand['displayName']}（服务端任务判定达成）")
+                try:
+                    time.sleep(1)
+                    opened_tab.close()
+                    print("✅ 已安全关闭目标平台标签页")
+                except Exception:
+                    pass
+                break
+            else:
+                print(f"⚠️ 点击 '{cand['displayName']}' 后未检测到新标签页打开，尝试下一个图标...")
+
+        # 铁律：必须真正检测到新标签页打开，才算分享成功！
+        if not new_tab_detected:
+            print("❌ 所有候选图标点击后均未唤起目标平台标签页，分享失败")
+            return False
+
+        print("✅ 完成视频分享操作")
         return True
     
     except Exception as e:
@@ -1390,641 +1143,283 @@ def cleanup_shared_logs(max_keep=30):
         logging.warning(f"清理 shared 状态日志失败: {e}")
 
 
-def share_account_details(account_name, status):
-    """记录账号操作状态到shared目录"""
+def get_today_status_file_path(date_str=None):
+    """获取指定日期的状态日志文件路径"""
     data_dir = 'account_data'
     shared_dir = os.path.join(data_dir, 'shared')
-    
-    # 确保shared目录存在
-    if not os.path.exists(shared_dir):
-        os.makedirs(shared_dir)
-    
-    # 获取当前时间
-    now = datetime.now()
-    date_str = now.strftime('%Y-%m-%d')
-    time_str = now.strftime('%H:%M:%S')
-    
-    # 准备文件名和内容
-    filename = os.path.join(shared_dir, f"{date_str}_status.txt")
-    line = f"{time_str} - {account_name}: {status}\n"
-    
-    # 追加到文件
-    with open(filename, 'a', encoding='utf-8') as f:
-        f.write(line)
+    os.makedirs(shared_dir, exist_ok=True)
+    if not date_str:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    return os.path.join(shared_dir, f"{date_str}_status.txt")
 
-    # 限制 shared 目录下的日志数量，最多只保留 30 份
+
+def init_today_status_file(accounts=None, ignored_accounts=None, date_str=None):
+    """
+    初始化今日账号打卡状态表格文件。
+    若今日文件不存在，则按账号列表生成打卡表格骨架：
+    yifan1 - 签到: ⏳ 未执行 --- 分享: ⏳ 未执行 --- 金币: ⏳ 未获取
+    yifan5 - 签到: ⏭️ 已忽略 --- 分享: ⏭️ 已忽略 --- 金币: ⏭️ 已忽略
+    """
+    filename = get_today_status_file_path(date_str)
+    if os.path.exists(filename):
+        return filename
+
+    data_dir = 'account_data'
+    if accounts is None:
+        try:
+            accounts = get_all_accounts()
+        except Exception:
+            accounts_file = os.path.join(data_dir, "accounts.txt")
+            if os.path.exists(accounts_file):
+                with open(accounts_file, 'r', encoding='utf-8') as f:
+                    accounts = [l.strip() for l in f if l.strip()]
+            else:
+                accounts = []
+
+    if ignored_accounts is None:
+        try:
+            ignored_accounts = set(get_ignored_accounts())
+        except Exception:
+            ignored_file = os.path.join(data_dir, "ignored_accounts.txt")
+            if os.path.exists(ignored_file):
+                with open(ignored_file, 'r', encoding='utf-8') as f:
+                    ignored_accounts = set([l.strip() for l in f if l.strip()])
+            else:
+                ignored_accounts = set()
+
+    lines = []
+    for acc in accounts:
+        if acc in ignored_accounts:
+            lines.append(f"{acc} - 签到: ⏭️ 已忽略 --- 分享: ⏭️ 已忽略 --- 金币: ⏭️ 已忽略\n")
+        else:
+            lines.append(f"{acc} - 签到: ⏳ 未执行 --- 分享: ⏳ 未执行 --- 金币: ⏳ 未获取\n")
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+
+    cleanup_shared_logs(30)
+    return filename
+
+
+def update_account_status(account_name, operation_type, success=True, time_str=None, date_str=None, coins=None):
+    """
+    就地更新今日表格中指定账号的操作状态、执行时间以及最新金币数。
+    格式: yifan1 - 签到: ✅（13:22:24） --- 分享: ✅（15:20:48） --- 金币: 1828
+    """
+    now = datetime.now()
+    if not date_str:
+        date_str = now.strftime('%Y-%m-%d')
+    if not time_str:
+        time_str = now.strftime('%H:%M:%S')
+
+    filename = get_today_status_file_path(date_str)
+    
+    # 确保文件已存在，不存在则初始化
+    if not os.path.exists(filename):
+        init_today_status_file(date_str=date_str)
+
+    status_badge = f"✅（{time_str}）" if success else f"❌（{time_str}）"
+
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception as e:
+        print(f"⚠️ 读取状态文件失败: {e}")
+        lines = []
+
+    account_found = False
+    updated_lines = []
+    # 正则兼容: 兼容 2 段旧格式与 3 段新格式，容忍中英文冒号
+    row_pattern = re.compile(
+        rf"^({re.escape(account_name)})\s*-\s*签到[:：]\s*(.*?)\s*---\s*分享[:：]\s*(.*?)(?:\s*---\s*金币[:：]\s*(.*?))?\s*$"
+    )
+
+    for line in lines:
+        stripped = line.strip()
+        m = row_pattern.match(stripped)
+        if m:
+            account_found = True
+            acc, signin_part, share_part, coins_part = m.groups()
+            if not coins_part:
+                coins_part = "⏳ 未获取"
+
+            if operation_type == '签到':
+                signin_part = status_badge
+            elif operation_type == '分享':
+                share_part = status_badge
+            elif operation_type == '金币':
+                coins_part = str(coins) if coins is not None else status_badge
+
+            if coins is not None:
+                coins_part = str(coins)
+
+            updated_lines.append(f"{acc} - 签到: {signin_part} --- 分享: {share_part} --- 金币: {coins_part}\n")
+        else:
+            updated_lines.append(line)
+
+    if not account_found:
+        signin_part = status_badge if operation_type == '签到' else "⏳ 未执行"
+        share_part = status_badge if operation_type == '分享' else "⏳ 未执行"
+        coins_part = str(coins) if coins is not None else "⏳ 未获取"
+        new_line = f"{account_name} - 签到: {signin_part} --- 分享: {share_part} --- 金币: {coins_part}\n"
+        updated_lines.append(new_line)
+
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.writelines(updated_lines)
+    except Exception as e:
+        print(f"⚠️ 写入状态文件失败: {e}")
+
     cleanup_shared_logs(30)
 
 
-def check_today_status(account_name, operation_type):
-    """检查账号最近 23小时50分钟内 是否已完成指定操作
+def get_today_account_coins(account_name, date_str=None):
+    """
+    从今日状态日志文件中读取该账号已记录的金币数量。
+    返回 int (如果存在且为有效数字)，否则返回 None。
+    """
+    filename = get_today_status_file_path(date_str)
+    if not os.path.exists(filename):
+        return None
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            for line in f:
+                line_str = line.strip()
+                if line_str.startswith(f"{account_name} -") or line_str.startswith(f"{account_name} "):
+                    m = re.search(r'金币[:：]\s*(\d+)', line_str)
+                    if m:
+                        return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def print_coins_summary_and_send_email(results, failed_accounts=None):
+    """
+    统一打印金币汇总结果并根据规则触发邮件通知。
+    邮件发送规则：
+    1. 有失败的账号时必须发送
+    2. 如果全部成功，则只有周一才发送
+    """
+    if failed_accounts is None:
+        failed_accounts = []
+
+    # 如果有失败的账号，提示用户手动登录
+    if failed_accounts:
+        print("\n" + "=" * 50)
+        print("⚠️  以下账号需要手动登录（登录状态已过期或操作失败）:")
+        for account_name in failed_accounts:
+            print(f"   - {account_name}")
+        print("\n💡 请使用以下命令手动登录:")
+        for account_name in failed_accounts:
+            print(f"   python main.py login {account_name}")
+        print("=" * 50)
+
+    # 打印汇总结果
+    if results:
+        print("\n📊 金币统计汇总:")
+        total_coins = sum(results.values())
+        for account_name in sorted(results.keys()):
+            print(f"   ✅ {account_name}: {results[account_name]} 金币")
+        print(f"   💰 总计: {total_coins} 金币")
+
+    # 检查是否需要发送邮件:
+    # 1. 有失败的账号时必须发送
+    # 2. 如果全部成功，则只有周一才发送
+    is_monday = datetime.now().weekday() == 0
+    has_failures = len(failed_accounts) > 0
+    should_send_email = has_failures or is_monday
+
+    # 只有在符合发送条件且邮箱配置正确时才发送邮件
+    if should_send_email and EMAIL_HOST and EMAIL_HOST != "smtp.xx.com":
+        total_coins = sum(results.values()) if results else 0
+        
+        # 构建主题
+        subject = "爱壹帆金币统计"
+        if failed_accounts:
+            subject += f"({len(failed_accounts)}个失败)"
+        
+        # 构建内容
+        content = f"""{datetime.now().strftime('%Y-%m-%d')}
+总金币: {total_coins}
+
+账号统计:
+"""
+        # 添加所有账号
+        all_accounts = sorted(list(set(list(results.keys()) + failed_accounts)))
+        for account in all_accounts:
+            if account in results:
+                content += f"✅ {account}: {results[account]}枚\n"
+            else:
+                content += f"❌ {account}: 需要手动登录\n"
+        
+        send_email(subject, content)
+        print("\n✅ 已发送邮件通知")
+
+
+def share_account_details(account_name, status):
+    """兼容旧接口"""
+    if "签到" in status:
+        update_account_status(account_name, "签到", success=("成功" in status))
+    elif "分享" in status:
+        update_account_status(account_name, "分享", success=("成功" in status))
+
+
+def check_today_status(account_name, operation_type, date_str=None):
+    """
+    检查账号在指定自然日（默认当天 00:00~23:59）内是否已成功完成指定操作（'签到' 或 '分享'）。
+    严格自然日逻辑：以自然日为绝对边界，只查验当天的状态日志，绝不跨天向前回溯。
     
     Args:
         account_name: 账号名称
         operation_type: 操作类型 ('签到' 或 '分享')
+        date_str: 可选自然日，格式 YYYY-MM-DD，默认为今天
     
     Returns:
-        bool: True 如果最近已成功完成该操作（需要跳过）
+        bool: True 如果当天已成功完成该操作（需要跳过），否则 False
     """
     data_dir = 'account_data'
     shared_dir = os.path.join(data_dir, 'shared')
     
-    now = datetime.now()
-    # 检查过去 23小时50分钟 内是否有记录
-    # 留 10 分钟余量是为了避免定时任务略微提前导致被跳过
-    cutoff = now - timedelta(hours=23, minutes=50)
-
-    last_success_time = None
-
-    # 只需要检查「今天」和「昨天」两个文件，就足以覆盖 24 小时窗口
-    for delta_days in (0, -1):
-        date = (now + timedelta(days=delta_days)).strftime('%Y-%m-%d')
-        status_file = os.path.join(shared_dir, f"{date}_status.txt")
-        if not os.path.exists(status_file):
-            continue
-
-        try:
-            with open(status_file, 'r', encoding='utf-8') as f:
-                for line in f:
-                    # 原始格式: "HH:MM:SS - account_name: 签到成功"
-                    if f"- {account_name}: {operation_type}成功" in line:
-                        try:
-                            time_part = line.split(" - ", 1)[0].strip()
-                            dt = datetime.strptime(f"{date} {time_part}", "%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            continue
-
-                        if last_success_time is None or dt > last_success_time:
-                            last_success_time = dt
-        except Exception:
-            # 读文件失败直接忽略，不影响其它文件
-            continue
-
-    if last_success_time is None:
-        # 从未成功过，或者超过两天没成功过
+    if not date_str:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    
+    status_file = os.path.join(shared_dir, f"{date_str}_status.txt")
+    if not os.path.exists(status_file):
         return False
 
-    # 在指定时间窗口内视为“已完成”，否则认为可以重新操作
-    return last_success_time > cutoff
+    try:
+        with open(status_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line_str = line.strip()
+                # 1. 全新打卡表格格式（例如: "yifan1 - 签到: ✅（22:17:42） --- 分享: ..."）
+                if line_str.startswith(f"{account_name} -") or line_str.startswith(f"{account_name} "):
+                    pattern = rf"{operation_type}[:：]\s*✅"
+                    if re.search(pattern, line_str):
+                        return True
+
+                # 2. 兼容旧版格式（例如: "HH:MM:SS - account_name: 签到成功"）
+                if f"- {account_name}: {operation_type}成功" in line_str:
+                    return True
+    except Exception:
+        return False
+
+    return False
 
 
 def force_click_sign_in_button(page):
-    """使用多种方法点击签到按钮"""
-    try:
-        # 获取页面内容进行调试
-        page_content = page.evaluate('''() => {
-            return {
-                url: window.location.href,
-                title: document.title,
-                bodyText: document.body.innerText.substring(0, 1000)
-            }
-        }''')
-        
-        # print(f"页面URL: {page_content.get('url')}")
-        print(f"页面标题: {page_content.get('title')}")
-        
-        # 方法一：直接DOM点击
-        print("方法一：直接DOM点击...")
-        success_dom = page.evaluate('''() => {
-            console.log("开始DOM点击搜索");
-            // 遍历页面中所有可见的元素
-            const allElements = Array.from(document.querySelectorAll('*'));
-            console.log(`页面共有 ${allElements.length} 个元素`);
-            
-            // 过滤出包含"立即签到"文本的元素
-            const signButtons = allElements.filter(el => {
-                return el.innerText && 
-                       el.innerText.trim() === '立即签到' && 
-                       el.offsetWidth > 0 && 
-                       el.offsetHeight > 0;
-            });
-            
-            console.log(`找到 ${signButtons.length} 个"立即签到"元素`);
-            
-            // 如果找到了按钮
-            if (signButtons.length > 0) {
-                const button = signButtons[0];
-                console.log(`找到按钮: ${button.tagName}, 内容: ${button.innerText}`);
-                console.log(`按钮类名: ${button.className}, ID: ${button.id || '无'}`);
-                
-                // 获取按钮位置
-                const rect = button.getBoundingClientRect();
-                console.log(`按钮位置: x=${rect.left}, y=${rect.top}, 宽=${rect.width}, 高=${rect.height}`);
-                
-                // 直接使用DOM点击
-                try {
-                    console.log("尝试DOM直接点击");
-                    button.click();
-                    console.log("DOM点击完成");
-                    return {
-                        success: true,
-                        method: "DOM直接点击",
-                        buttonInfo: {
-                            text: button.innerText,
-                            tag: button.tagName,
-                            class: button.className,
-                            id: button.id || '无',
-                            x: rect.left + rect.width/2,
-                            y: rect.top + rect.height/2
-                        }
-                    };
-                } catch(e) {
-                    console.log(`DOM点击失败: ${e.message}`);
-                }
-            }
-            
-            return { success: false };
-        }''')
-        
-        if success_dom.get('success', False):
-            print(f"✅ 成功通过DOM点击: {success_dom.get('method')}")
-            print(f"按钮信息: {success_dom.get('buttonInfo')}")
-            
-            # 保存点击后的截图
-            time.sleep(2)
-            
-            # 检查是否弹出了对话框
-            check_dialog(page)
-            return True
-        else:
-            print("❌ DOM点击失败，尝试其他方法")
-        
-        # 方法二：查找并定位精确的"立即签到"按钮，然后精确点击相应区域
-        print("方法二：开始精确定位签到按钮...")
-        # 滚动页面以确保按钮可见
-        sign_areas = [300, 400, 500, 600, 700, 800]  # 可能的Y坐标值
-        
-        for scroll_y in sign_areas:
-            # print(f"滚动到位置 y={scroll_y}")
-            page.evaluate(f"window.scrollTo(0, {scroll_y})")
-            time.sleep(2)
-            
-            # 获取页面中所有可见元素的信息
-            elements_info = page.evaluate('''() => {
-                const signTexts = ['立即签到', '每日签到', '签到'];
-                
-                // 获取页面中所有可见的文本元素
-                const visibleElements = Array.from(document.querySelectorAll('*')).filter(el => {
-                    if (!el.innerText) return false;
-                    const text = el.innerText.trim();
-                    const rect = el.getBoundingClientRect();
-                    return signTexts.some(signText => text.includes(signText)) && 
-                           rect.width > 0 && rect.height > 0 &&
-                           rect.top >= 0 && rect.top < window.innerHeight;
-                });
-                
-                return visibleElements.map(el => {
-                    const rect = el.getBoundingClientRect();
-                    return {
-                        text: el.innerText.trim().substring(0, 50),
-                        tag: el.tagName,
-                        id: el.id || '无',
-                        className: el.className,
-                        position: {
-                            x: rect.left + rect.width/2,
-                            y: rect.top + rect.height/2,
-                            width: rect.width,
-                            height: rect.height,
-                            visible: rect.top >= 0 && rect.top < window.innerHeight
-                        }
-                    };
-                });
-            }''')
-            
-            # print(f"在当前视图找到 {len(elements_info)} 个可能相关的元素")
-            
-            # 查找精确匹配"立即签到"的元素
-            for i, elem in enumerate(elements_info):
-                # print(f"元素 {i+1}: {elem.get('text')} ({elem.get('tag')})")
-                # print(f"  位置: x={elem.get('position', {}).get('x')}, y={elem.get('position', {}).get('y')}")
-                
-                if "立即签到" in elem.get('text', ''):
-                    print(f"✅ 找到精确匹配的'立即签到'元素!")
-                    
-                    # 执行多种点击尝试
-                    
-                    # 1. 原生DOM点击
-                    success_dom = page.evaluate(f'''() => {{
-                        const elements = Array.from(document.querySelectorAll('*'));
-                        for (const el of elements) {{
-                            if (el.innerText && el.innerText.includes('立即签到')) {{
-                                try {{
-                                    // 尝试移除可能阻碍点击的覆盖层
-                                    const overlays = document.querySelectorAll('.overlay, .modal-overlay, .mask, [class*="overlay"], [class*="mask"]');
-                                    for (const overlay of overlays) {{
-                                        overlay.style.display = 'none';
-                                        overlay.style.pointerEvents = 'none';
-                                    }}
-                                    
-                                    // 将元素滚动到视图并点击
-                                    el.scrollIntoView({{behavior: 'smooth', block: 'center'}});
-                                    setTimeout(() => {{
-                                        el.click();
-                                        console.log('元素已点击');
-                                    }}, 500);
-                                    return true;
-                                }} catch(e) {{
-                                    console.error('DOM点击失败:', e);
-                                    return false;
-                                }}
-                            }}
-                        }}
-                        return false;
-                    }}''')
-                    
-                    if success_dom:
-                        print("✅ 原生DOM点击成功")
-                        time.sleep(2)
-                 
-                        # 检查对话框
-                        if check_dialog(page):
-                            return True
-                    
-                    # 2. 坐标点击
-                    pos = elem.get('position', {})
-                    x = pos.get('x', 0)
-                    y = pos.get('y', 0)
-                    
-                    if x > 0 and y > 0:
-                        print(f"尝试点击坐标: ({x}, {y})")
-                        
-                        # 确保元素在视图中
-                        page.evaluate(f"window.scrollTo(0, {y - 200})")
-                        time.sleep(1)
-    
-                        # 执行点击
-                        page.mouse.click(x, y)
-                        print("✅ 坐标点击完成")
-                        
-                        # 点击后截图
-                        time.sleep(2)
+    """兼容旧接口：定位并点击签到按钮"""
+    btn = find_sign_in_button(page)
+    if btn:
+        btn.click(force=True)
+        return True
+    return False
 
-                        # 检查对话框
-                        if check_dialog(page):
-                            return True
-                    
-                    # 3. 使用evaluate直接操作DOM执行点击
-                    success_js = page.evaluate(f'''() => {{
-                        // 获取元素在页面中的坐标
-                        const x = {x};
-                        const y = {y};
-                        
-                        // 找到该坐标上的所有元素
-                        const elementsAtPoint = document.elementsFromPoint(x, y);
-                        console.log('坐标上的元素:', elementsAtPoint.length);
-                        
-                        // 查找可点击的元素
-                        for (const el of elementsAtPoint) {{
-                            console.log('元素:', el.tagName, el.className, el.innerText);
-                            if (el.innerText && el.innerText.includes('立即签到')) {{
-                                try {{
-                                    // 创建点击事件并触发
-                                    const clickEvent = new MouseEvent('click', {{
-                                        bubbles: true,
-                                        cancelable: true,
-                                        view: window,
-                                        clientX: x,
-                                        clientY: y
-                                    }});
-                                    
-                                    el.dispatchEvent(clickEvent);
-                                    console.log('点击事件已触发');
-                                    return true;
-                                }} catch(e) {{
-                                    console.error('JS点击失败:', e);
-                                }}
-                            }}
-                        }}
-                        
-                        // 找不到精确匹配的元素，尝试最接近的元素
-                        if (elementsAtPoint.length > 0) {{
-                            try {{
-                                // 点击最上层元素
-                                elementsAtPoint[0].click();
-                                console.log('已点击最上层元素');
-                                return true;
-                            }} catch(e) {{
-                                console.error('最上层元素点击失败:', e);
-                            }}
-                        }}
-                        
-                        return false;
-                    }}''')
-                    
-                    if success_js:
-                        print("✅ JavaScript事件点击成功")
-                        time.sleep(2)
-              
-                        # 检查对话框
-                        if check_dialog(page):
-                            return True
-        
-        # 方法三：尝试使用特定坐标直接点击
-        print("方法三：尝试使用固定坐标点击...")
-        # 使用常见的签到按钮坐标位置（基于先前截图观察）
-        sign_button_coords = [
-            {'x': 631, 'y': 674},  # 观察到的立即签到按钮位置
-            {'x': 631, 'y': 600},  # 可能的备选位置1
-            {'x': 631, 'y': 500},  # 可能的备选位置2
-            {'x': 631, 'y': 400},  # 可能的备选位置3
-            {'x': 631, 'y': 300},  # 可能的备选位置4
-            {'x': 631, 'y': 200},  # 可能的备选位置5
-            {'x': 631, 'y': 100},  # 可能的备选位置6
-        ]
-        
-        for i, coords in enumerate(sign_button_coords):
-            x, y = coords['x'], coords['y']
-            print(f"尝试点击固定坐标位置 {i+1}: ({x}, {y})")
-            
-            # 滚动到坐标位置附近
-            page.evaluate(f"window.scrollTo(0, {y - 200})")
-            time.sleep(1)
-            
-            # 执行点击
-            page.mouse.click(x, y)
-            # print(f"✅ 已点击坐标位置 {i+1}")
-            
-            # 等待可能的对话框
-            time.sleep(2)
-            
-            # 检查对话框
-            if check_dialog(page):
-                return True
-        
-        print("❌ 所有点击方法都尝试失败")
-        return False
-    except Exception as e:
-        print(f"强制点击过程中出错: {str(e)}")
-        traceback.print_exc()
-        return False
 
 def check_dialog(page, recursion_depth=0):
-    """检查是否弹出了签到确认对话框，并处理"""
-    # 防止无限递归
-    if recursion_depth > 1:
-        print("⚠️ 检查对话框递归深度过高，停止递归")
-        return False
-        
-    try:
-        
-        # 检查是否有弹出对话框
-        dialog_info = page.evaluate('''() => {
-            console.log("开始检查对话框");
-            
-            // 查找可能的对话框元素（包括签到弹窗）
-            const dialogs = document.querySelectorAll('.dialog, .modal, .popup, [class*="dialog"], [class*="modal"], [class*="popup"], [class*="sign"], [class*="check-in"]');
-            console.log(`找到 ${dialogs.length} 个可能的对话框元素`);
-            
-            if (dialogs.length > 0) {
-                const dialog = dialogs[0];
-                const rect = dialog.getBoundingClientRect();
-                console.log(`对话框尺寸: ${rect.width}x${rect.height}, 位置: (${rect.left}, ${rect.top})`);
-                
-                // 查找对话框中的文本内容
-                const dialogText = dialog.innerText;
-                console.log(`对话框内容: ${dialogText.substring(0, 100)}...`);
-                
-                // 查找确认按钮 - 优先检查ID为signInBtn的元素
-                let confirmButtons = [];
-                // 1. 首先查找特定ID的签到按钮（根据用户提供的按钮HTML）
-                const signInBtn = document.getElementById('signInBtn');
-                if (signInBtn && signInBtn.offsetWidth > 0 && signInBtn.offsetHeight > 0) {
-                    confirmButtons.push(signInBtn);
-                    console.log('找到ID为signInBtn的按钮元素');
-                }
-                
-                // 2. 然后检查带有特定类名的按钮
-                if (confirmButtons.length === 0) {
-                    const buttonElements = dialog.querySelectorAll('.button, [class*="btn"]');
-                    confirmButtons = Array.from(buttonElements).filter(el => 
-                        el.offsetWidth > 0 && el.offsetHeight > 0
-                    );
-                }
-                
-                // 3. 最后才检查文本内容
-                if (confirmButtons.length === 0) {
-                    confirmButtons = Array.from(dialog.querySelectorAll('*')).filter(el => {
-                        const text = el.innerText && el.innerText.trim();
-                        return text && (
-                            text.includes('即刻签到') ||
-                            text.includes('立即签到') ||
-                            text.includes('确定') ||
-                            text.includes('确认')
-                        ) && el.offsetWidth > 0 && el.offsetHeight > 0;
-                    });
-                }
-                
-                console.log(`找到 ${confirmButtons.length} 个可能的确认按钮`);
-                
-                let buttonInfo = null;
-                if (confirmButtons.length > 0) {
-                    const button = confirmButtons[0];
-                    const btnRect = button.getBoundingClientRect();
-                    
-                    buttonInfo = {
-                        text: button.innerText ? button.innerText.trim() : '图片按钮',
-                        tag: button.tagName,
-                        id: button.id || '无',
-                        className: button.className,
-                        x: btnRect.left + btnRect.width/2,
-                        y: btnRect.top + btnRect.height/2
-                    };
-                    
-                    console.log(`确认按钮: ${buttonInfo.text}, 位置: (${buttonInfo.x}, ${buttonInfo.y})`);
-                }
-                
-                return {
-                    found: true,
-                    text: dialogText.substring(0, 100),
-                    x: rect.left + rect.width/2,
-                    y: rect.top + rect.height/2,
-                    confirmButton: buttonInfo
-                };
-            }
-            
-            // 没有找到常规对话框，尝试查找所有包含"即刻签到"文本的元素
-            const textElements = Array.from(document.querySelectorAll('*')).filter(el => {
-                const text = el.innerText && el.innerText.trim();
-                return text && (
-                    text.includes('即刻签到') ||
-                    text.includes('立即签到') ||
-                    text.includes('确定签到')
-                ) && el.offsetWidth > 0 && el.offsetHeight > 0;
-            });
-            
-            console.log(`找到 ${textElements.length} 个包含确认文本的元素`);
-            
-            if (textElements.length > 0) {
-                const element = textElements[0];
-                const rect = element.getBoundingClientRect();
-                
-                return {
-                    found: true,
-                    text: element.innerText || `元素(ID:${element.id || '无'}, 类名:${element.className})`,
-                    custom: true,
-                    x: rect.left + rect.width/2,
-                    y: rect.top + rect.height/2
-                };
-            }
-            
-            // 没有找到常规对话框，尝试查找特定元素
-            // 1. 先检查ID为signInBtn的元素
-            const signInBtn = document.getElementById('signInBtn');
-            if (signInBtn && signInBtn.offsetWidth > 0 && signInBtn.offsetHeight > 0) {
-                const rect = signInBtn.getBoundingClientRect();
-                return {
-                    found: true,
-                    text: '签到按钮(ID: signInBtn)',
-                    custom: true,
-                    x: rect.left + rect.width/2,
-                    y: rect.top + rect.height/2
-                };
-            }
-            
-            // 2. 检查类名包含特定关键字的元素
-            const buttonElements = document.querySelectorAll('.button, [class*="btn"], [class*="sign"]');
-            const visibleButtons = Array.from(buttonElements).filter(el => 
-                el.offsetWidth > 0 && el.offsetHeight > 0
-            );
-            
-            // 3. 如果上面都没找到，再尝试通过文本查找
-            if (visibleButtons.length === 0) {
-                const additionalTextElements = Array.from(document.querySelectorAll('*')).filter(el => {
-                    const text = el.innerText && el.innerText.trim();
-                    return text && (
-                        text.includes('即刻签到') ||
-                        text.includes('立即签到') ||
-                        text.includes('确定签到')
-                    ) && el.offsetWidth > 0 && el.offsetHeight > 0;
-                });
-                
-                if (additionalTextElements.length > 0) {
-                    visibleButtons.push(...additionalTextElements);
-                }
-            }
-            
-            console.log(`找到 ${visibleButtons.length} 个包含确认文本的元素`);
-            
-            if (visibleButtons.length > 0) {
-                const element = visibleButtons[0];
-                const rect = element.getBoundingClientRect();
-                
-                return {
-                    found: true,
-                    text: element.innerText || `元素(ID:${element.id || '无'}, 类名:${element.className})`,
-                    custom: true,
-                    x: rect.left + rect.width/2,
-                    y: rect.top + rect.height/2
-                };
-            }
-            
-            return { found: false };
-        }''')
-        
-        if dialog_info.get('found', False):
-            print("✅ 找到对话框或确认元素!")
-            # print(f"对话框内容: {dialog_info.get('text', '')}")
-            
-            # 获取确认按钮或对话框中心点信息
-            confirm_button = dialog_info.get('confirmButton')
-            
-            if confirm_button:
-                print(f"找到确认按钮: {confirm_button.get('text')} ({confirm_button.get('tag')})")
-                print(f"按钮位置: x={confirm_button.get('x')}, y={confirm_button.get('y')}")
-                
-                # 确保按钮在视图中
-                page.evaluate(f"window.scrollTo(0, {confirm_button.get('y') - 200})")
-                time.sleep(1)
-                
-                # 点击确认按钮 - 首先尝试直接通过ID点击signInBtn
-                dom_click_success = page.evaluate('''() => {
-                    // 1. 先尝试直接通过ID点击
-                    const signInBtn = document.getElementById('signInBtn');
-                    if (signInBtn) {
-                        try {
-                            console.log('尝试点击ID为signInBtn的按钮');
-                            signInBtn.click();
-                            return true;
-                        } catch(e) {
-                            console.error('点击signInBtn失败:', e);
-                        }
-                    }
-                     
-                    // 2. 尝试查找带有特定类名的按钮  
-                    const buttons = document.querySelectorAll('.button, [class*="btn"], [class*="sign"]');
-                    if (buttons.length > 0) {
-                        try {
-                            console.log('尝试点击类名匹配的按钮');
-                            for (let i = 0; i < buttons.length; i++) {
-                                if (buttons[i].offsetWidth > 0 && buttons[i].offsetHeight > 0) {
-                                    buttons[i].click();
-                                    return true;
-                                }
-                            }
-                             return true;
-                        } catch(e) {
-                            console.error('DOM点击确认按钮失败:', e);
-                        }
-                    }
-                    
-                    // 3. 最后尝试文本匹配
-                    const textButtons = Array.from(document.querySelectorAll('*')).filter(el => {
-                        const text = el.innerText && el.innerText.trim();
-                        return text && (
-                            text.includes('即刻签到') ||
-                            text.includes('立即签到') ||
-                            text.includes('确定') ||
-                            text.includes('确认')
-                        );
-                    });
-                    
-                    if (textButtons.length > 0) {
-                        try {
-                            textButtons[0].click();
-                            return true;
-                        } catch(e) {
-                            console.error('通过文本DOM点击失败:', e);
-                        }
-                    }
-                    
-                    return false;
-                }''')
-                
-                if dom_click_success:
-                    print("✅ DOM点击确认按钮成功")
-                    time.sleep(2)
-                    # 检查是否弹出了另一个对话框
-                    if recursion_depth < 1:
-                        result = check_dialog(page, recursion_depth + 1)
-                    return True
-                
-                # 2. 鼠标点击 - 使用中心点坐标
-                try:
-                    print(f"尝试鼠标点击坐标: x={confirm_button.get('x')}, y={confirm_button.get('y')}")
-                    page.mouse.click(confirm_button.get('x'), confirm_button.get('y'))
-                    print("✅ 通过鼠标坐标点击成功")
-                    time.sleep(2)
-                    return True
-                except Exception as e:
-                    print(f"❌ 鼠标点击失败: {str(e)}")
-            else:
-                # 如果找到对话框但没有找到确认按钮，尝试点击对话框中心
-                try:
-                    print(f"未找到确认按钮，尝试点击对话框中心: x={dialog_info.get('x')}, y={dialog_info.get('y')}")
-                    page.mouse.click(dialog_info.get('x'), dialog_info.get('y'))
-                    # print("✅ 点击对话框中心完成")
-                    time.sleep(2)
-                    return True
-                except Exception as e:
-                    print(f"❌ 点击对话框中心失败: {str(e)}")
-        else:
-            print("⚠️ 未检测到对话框或确认元素")
-        
-        return False
-    except Exception as e:
-        print(f"❌ 检查对话框过程中出错: {str(e)}")
-        traceback.print_exc()
-        return False
+    """兼容旧接口：处理签到确认弹窗"""
+    return handle_check_in_dialog(page)
+
 
 def run_check_in_for_account(account_name, headless=False):
     """为指定账号执行签到操作"""
@@ -2040,31 +1435,28 @@ def run_check_in_for_account(account_name, headless=False):
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
         print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
+        update_account_status(account_name, '签到', success=False)
         return False
     
     with sync_playwright() as p:
         try:
-            # 启动浏览器
+            # 启动浏览器，设定标准桌面视口避免无头模式下页面折叠
             browser = p.chromium.launch(headless=headless)
-            context = browser.new_context()
-            page = context.new_page()
-            
-            # 设置窗口大小
-            if not headless:
-                page.set_viewport_size({"width": 2560, "height": 1440})
+            context = browser.new_context(viewport={"width": 1920, "height": 1080})
             
             # 加载保存的状态
             try:
                 if not load_storage_state(context, state_file):
                     browser.close()
+                    update_account_status(account_name, '签到', success=False)
                     return False
                 print(f"✅ 已加载账号 '{account_name}' 的登录状态")
             except Exception as e:
                 print(f"❌ 加载账号状态失败: {short_error(e)}")
                 browser.close()
+                update_account_status(account_name, '签到', success=False)
                 return False
             
-            # 打开新页面
             page = context.new_page()
             
             # 访问网站
@@ -2073,72 +1465,120 @@ def run_check_in_for_account(account_name, headless=False):
                 page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=45000)
             except Exception as e:
                 print(f"⚠️ 打开个人中心超时: {short_error(e)}，尝试继续")
-            time.sleep(5)
             
             # 检查登录状态
             if not check_login_status(page):
                 print("❌ 登录状态失效，请重新登录")
                 browser.close()
+                update_account_status(account_name, '签到', success=False)
                 return False
             
-            # 最多尝试3次签到
-            max_attempts = 3
+            # 动态轮询等待签到模块异步数据挂载（最长等待 15 秒）
+            print("正在等待个人中心签到状态加载...")
+            status, result = wait_for_sign_in_section(page, timeout_sec=15)
+
+            if status == 'already_signed':
+                print(f"⏭️ 页面显示账号 '{account_name}' 今日此前已完成签到（{result}），无需重复点击")
+                coins_current = get_current_coins(page)
+                update_account_status(account_name, "签到", success=True, coins=coins_current)
+                browser.close()
+                return True
+
+            if status == 'timeout':
+                print("⚠️ 超时未检测到'立即签到'或'已签到'按钮")
+                debug_info = page.evaluate('''() => {
+                    const list = [];
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.children.length === 0 && el.innerText && el.innerText.includes('签到') && el.offsetWidth > 0) {
+                            list.push({
+                                tag: el.tagName,
+                                class: el.className ? String(el.className) : '',
+                                text: el.innerText.replace(/\\s+/g, ' ').trim().substring(0, 30)
+                            });
+                        }
+                    });
+                    return list.slice(0, 8);
+                }''')
+                if debug_info:
+                    print(f"🔍 调试诊断：页面包含'签到'字样的元素: {debug_info}")
+                browser.close()
+                update_account_status(account_name, '签到', success=False)
+                return False
+
+            # status == 'ready_to_sign'
+            sign_btn = result
+
+            # 获取签到前的金币数
+            coins_before = get_current_coins(page)
+            if coins_before is not None:
+                print(f"💰 签到前金币数量: {coins_before}")
+
+            # 尝试签到（最多尝试 2 次）
+            max_attempts = 2
+            sign_in_success = False
             for attempt in range(1, max_attempts + 1):
                 print(f"\n----- 签到尝试 {attempt}/{max_attempts} -----")
-                # 尝试点击签到按钮
+                if attempt > 1:
+                    # 重试时重新定位按钮
+                    sign_btn = find_sign_in_button(page)
+                    if not sign_btn:
+                        # 尝试2未找到按钮时，必须确凿核验金币增加才认可成功
+                        if check_sign_in_success(page, coins_before):
+                            print("✅ 签到成功（金币资产已确认增加）")
+                            coins_after = get_current_coins(page)
+                            update_account_status(account_name, "签到", success=True, coins=coins_after or coins_before)
+                            sign_in_success = True
+                            break
+                        print("⚠️ 未找到高亮可点击的'立即签到'按钮")
+                        time.sleep(2)
+                        continue
+
+                print("找到高亮可点击的'立即签到'按钮，正在执行点击...")
                 try:
-                    force_click_sign_in_button(page)
-     
-                    # 检查并处理签到确认弹窗
-                    if check_dialog(page):
-                        print("已处理签到确认弹窗")
-                    else:
-                        print("尝试处理签到弹窗...")
-                        # 使用专门的签到按钮点击函数
-                        direct_click_sign_in_button(page)
-                    
-                    # 等待签到完成
-                    time.sleep(5)
-                    
-                    # 检查签到是否成功
-                    if check_sign_in_success(page):
-                        print("✅ 签到成功")
-                 
-                        # 记录成功状态
-                        share_account_details(account_name, "签到成功")
-                        return True
-                    else:
-                        if attempt < max_attempts:
-                            print(f"❌ 签到未成功，准备第{attempt+1}次尝试...")
-                        else:
-                            print("❌ 所有尝试均未成功，或无法确认结果")
-                           
-                            return False
-                    
+                    sign_btn.scroll_into_view_if_needed()
+                    time.sleep(0.5)
+                    sign_btn.click(timeout=5000)
+                    print("✅ 已点击'立即签到'按钮")
                 except Exception as e:
-                    print(f"❌ 签到过程中出错: {short_error(e)}")
-                    
+                    print(f"⚠️ 点击签到按钮异常: {short_error(e)}，尝试通过JS点击")
+                    try:
+                        page.evaluate("(el) => el.click()", sign_btn.element_handle())
+                        print("✅ 已通过JS点击'立即签到'按钮")
+                    except Exception as e2:
+                        print(f"❌ 点击仍然失败: {short_error(e2)}")
+
+                # 处理可能弹出的确认对话框（在小窗口中点击'即刻签到'）
+                handle_check_in_dialog(page, timeout_sec=6)
+
+                # 严格核验证签到结果（金币增加 / 按钮翻转为'已签到'）
+                if check_sign_in_success(page, coins_before):
+                    print("✅ 签到成功")
+                    coins_after = get_current_coins(page)
+                    update_account_status(account_name, "签到", success=True, coins=coins_after or coins_before)
+                    sign_in_success = True
+                    break
+                else:
                     if attempt < max_attempts:
-                        print(f"准备第{attempt+1}次尝试...")
-                    else:
-                        return False
-                
-                # 在尝试之间等待
-                if attempt < max_attempts:
-                    print(f"等待5秒后进行下一次尝试...")
-                    time.sleep(5)
-            
-            return False
+                        print(f"⚠️ 第 {attempt} 次尝试未确认成功，准备重试...")
+                        time.sleep(3)
+
+            browser.close()
+            if not sign_in_success:
+                update_account_status(account_name, '签到', success=False)
+            return sign_in_success
             
         except Exception as e:
             print(f"❌ 执行签到时出错: {short_error(e)}")
+            update_account_status(account_name, '签到', success=False)
             return False
         finally:
-            # 关闭浏览器
             if 'browser' in locals():
-                browser.close()
-    
-    return False
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+
 
 def run_share_video_for_account(account_name, headless=False):
     """为指定账号执行分享视频操作"""
@@ -2154,19 +1594,22 @@ def run_share_video_for_account(account_name, headless=False):
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
         print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
+        update_account_status(account_name, "分享", success=False)
         return False
     
+    session_expired = False
+
     def try_share_with_mode(use_headless):
+        nonlocal session_expired
         with sync_playwright() as p:
             try:
-                # 启动浏览器
+                # 启动浏览器，统一配置 1080P 标准视口并授予剪贴板读写权限
                 browser = p.chromium.launch(headless=use_headless)
-                context = browser.new_context()
+                context = browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    permissions=["clipboard-read", "clipboard-write"]
+                )
                 page = context.new_page()
-                
-                # 设置窗口大小
-                if not use_headless:
-                    page.set_viewport_size({"width": 2560, "height": 1440})
                 
                 # 加载保存的状态
                 try:
@@ -2179,27 +1622,61 @@ def run_share_video_for_account(account_name, headless=False):
                     browser.close()
                     return False
                 
-                # 打开页面
-                try:
-                    page.goto("https://www.yfsp.tv/", wait_until="domcontentloaded", timeout=45000)
-                except Exception as e:
-                    print(f"⚠️ 打开首页超时: {short_error(e)}，尝试继续")
-                time.sleep(3)
-                
-                # 检查登录状态
-                if not check_login_status(page):
-                    print(f"❌ 账号 '{account_name}' 未登录")
+                # 严格服务端鉴权验证（直接访问个人中心并校验资产或用户信息）
+                print("正在通过服务端验证账号登录态有效性...")
+                if not verify_account_session(page, timeout_ms=30000):
+                    print(f"❌ 账号 '{account_name}' 登录态在服务端已失效，终止执行分享")
+                    session_expired = True
                     browser.close()
                     return False
+
+                # 此时在个人中心，获取分享前金币数量
+                coins_before = get_current_coins(page)
+                if coins_before is not None:
+                    print(f"💰 分享前金币数量: {coins_before}")
                 
+                print(f"✅ 账号 '{account_name}' 服务端鉴权有效，开始执行分享视频...")
                 # 执行分享操作
                 success = share_video(page)
+                coins_after = None
                 if success:
+                    # 重新核验个人中心资产与任务状态变动
+                    try:
+                        page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=25000)
+                        time.sleep(2)
+                        
+                        # 检查个人中心分享任务按钮状态（如'待完成' / '已完成'）
+                        task_items = page.evaluate('''() => {
+                            const res = [];
+                            document.querySelectorAll('*').forEach(el => {
+                                if (el.children.length === 0 && el.innerText && el.offsetWidth > 0) {
+                                    const t = el.innerText.trim();
+                                    if (t === '待完成' || t === '已完成' || t === '去完成' || (t.includes('分享') && t.length < 20)) {
+                                        res.push(t);
+                                    }
+                                }
+                            });
+                            return res;
+                        }''')
+                        if task_items:
+                            print(f"📋 个人中心任务状态项: {task_items}")
+
+                        coins_after = get_current_coins(page)
+                        if coins_before is not None and coins_after is not None:
+                            if coins_after > coins_before:
+                                print(f"✅ 金币资产已真实增加：{coins_before} ➡️ {coins_after}（服务端入账铁证）")
+                            elif coins_after == coins_before:
+                                print(f"ℹ️ 个人中心当前金币数量: {coins_after}")
+                    except Exception as e:
+                        print(f"⚠️ 复核分享后个人中心跳过: {short_error(e)}")
+
                     print(f"✅ 账号 '{account_name}' 分享视频成功")
-                    # 记录分享成功状态
-                    share_account_details(account_name, "分享成功")
+                    final_coins = coins_after if coins_after is not None else coins_before
+                    # 记录分享成功状态与最新金币数
+                    update_account_status(account_name, "分享", success=True, coins=final_coins)
                 else:
                     print(f"❌ 账号 '{account_name}' 分享视频失败")
+                    update_account_status(account_name, "分享", success=False, coins=coins_before)
                 
                 browser.close()
                 return success
@@ -2212,19 +1689,21 @@ def run_share_video_for_account(account_name, headless=False):
     
     # 尝试使用指定模式
     success = try_share_with_mode(headless)
-    if not success and not headless:
+    if not success and not headless and not session_expired:
         print("\n⚠️ 可见模式失败，尝试无头模式...")
         success = try_share_with_mode(True)
+    
+    if not success:
+        update_account_status(account_name, "分享", success=False)
     
     return success
 
 def run_for_single_account(account_name, headless=False):
-    """为单个账号执行所有操作（先分享视频再签到）"""
-    # 先执行视频分享，再执行签到
-    share_result = run_share_video_for_account(account_name, headless)
+    """为单个账号执行所有操作（先签到再分享视频）"""
     check_in_result = run_check_in_for_account(account_name, headless)
+    share_result = run_share_video_for_account(account_name, headless)
     
-    return share_result and check_in_result
+    return check_in_result and share_result
 
 
 def get_accounts_from_account_json(data_dir=None):
@@ -3341,6 +2820,9 @@ def auto_operations(operation_type='all', headless=True):
         print("❌ 未找到已保存的账号，请先使用 'add' 命令添加账号")
         return False
 
+    # 自动初始化今日状态打卡表骨架
+    init_today_status_file(accounts, ignored_accounts)
+
     active_accounts = [account for account in accounts if account not in ignored_accounts]
     skipped_accounts = [account for account in accounts if account in ignored_accounts]
 
@@ -3354,6 +2836,9 @@ def auto_operations(operation_type='all', headless=True):
     print(f"\n➡️ 开始为 {len(active_accounts)} 个账号执行操作: {operation_type}")
     
     success_count = 0
+    results_coins = {}
+    failed_accounts = []
+
     for i, account_name in enumerate(active_accounts, 1):
         print(f"\n[{i}/{len(active_accounts)}] 处理账号: {account_name}")
         
@@ -3365,19 +2850,48 @@ def auto_operations(operation_type='all', headless=True):
             # 将headless参数传递给分享函数，允许尝试无头模式
             success = run_share_video_for_account(account_name, headless=headless)
         else:  # 'all'
-            # 执行所有操作，必须签到和分享都成功才算成功
+            # 严格自然日逻辑：只有当签到和分享在今日均已成功完成，才整体跳过该账号
+            checkin_done = check_today_status(account_name, '签到')
+            share_done = check_today_status(account_name, '分享')
+            if checkin_done and share_done:
+                print(f"⏭️ 账号 '{account_name}' 今日签到与分享均已完成，跳过")
+                success = True
+                success_count += 1
+                c = get_today_account_coins(account_name)
+                if c is not None:
+                    results_coins[account_name] = c
+                continue
+
+            # 若有任一项未完成，则分别推进（已完成的单项会在各自函数内部秒跳过）
             check_in_success = run_check_in_for_account(account_name, headless=headless)
             share_success = run_share_video_for_account(account_name, headless=headless)
             success = check_in_success and share_success
             
         if success:
             success_count += 1
+            c = get_today_account_coins(account_name)
+            if c is not None:
+                results_coins[account_name] = c
+        else:
+            failed_accounts.append(account_name)
     
     print(f"\n✅ 操作完成: {success_count}/{len(active_accounts)} 个账号成功")
     
-    # 执行完操作后，获取所有账号的金币数量
-    print("\n🔄 正在获取所有账号的金币数量...")
-    get_coins_for_all_accounts(headless=headless)
+    # 对未在签到/分享过程中直接取得金币的少数账号进行补充获取（若均已取得则无需启动任何浏览器）
+    missing_coins = [acc for acc in active_accounts if acc not in results_coins and acc not in failed_accounts]
+    if missing_coins:
+        print(f"\n🔄 为 {len(missing_coins)} 个账号补充获取金币数量...")
+        for acc in missing_coins:
+            try:
+                coins = get_account_coins(acc, headless=headless)
+                if coins is not None:
+                    results_coins[acc] = coins
+                    update_account_status(acc, "金币", coins=coins)
+            except Exception as e:
+                print(f"⚠️ 补充获取账号 '{acc}' 金币失败: {e}")
+
+    # 直接输出汇总并触发邮件通知，彻底免除第二轮全量重复打开浏览器的开销
+    print_coins_summary_and_send_email(results_coins, failed_accounts)
     
     return success_count > 0
 
@@ -3475,44 +2989,11 @@ def get_account_coins(account_name, headless=True):
                 time.sleep(3)  # 额外等待，确保JavaScript完成渲染
                 
                 # 获取金币数量
-                coins = None
-                try:
-                    # 使用提供的HTML结构定位金币元素
-                    coins_element = page.locator('div[title="金币"]').first
-                    if coins_element.count() > 0:
-                        # 获取金币数值文本
-                        coins_text = coins_element.inner_text()
-                        # 提取数字
-                        import re
-                        coins_match = re.search(r'\d+', coins_text)
-                        if coins_match:
-                            coins = int(coins_match.group())
-                            print(f"✅ 账号 '{account_name}' 当前金币数量: {coins}")
-                        else:
-                            print(f"❌ 无法解析金币数值: {coins_text}")
-                    else:
-                        # 尝试使用JavaScript获取
-                        print("尝试使用JavaScript获取金币数量...")
-                        coins_data = page.evaluate('''() => {
-                            const coinDiv = document.querySelector('div[title="金币"]');
-                            if (coinDiv) {
-                                const text = coinDiv.textContent.trim();
-                                return text;
-                            }
-                            return null;
-                        }''')
-                        
-                        if coins_data:
-                            coins_match = re.search(r'\d+', coins_data)
-                            if coins_match:
-                                coins = int(coins_match.group())
-                                print(f"✅ 账号 '{account_name}' 当前金币数量: {coins}")
-                            else:
-                                print(f"❌ 无法解析金币数值: {coins_data}")
-                        else:
-                            print("❌ 未找到金币元素")
-                except Exception as e:
-                    print(f"❌ 获取金币数量时出错: {str(e)}")
+                coins = get_current_coins(page)
+                if coins is not None:
+                    print(f"✅ 账号 '{account_name}' 当前金币数量: {coins}")
+                else:
+                    print(f"❌ 未能获取到账号 '{account_name}' 的金币数量")
                 
                 return coins
             except Exception as e:
@@ -3561,6 +3042,7 @@ def get_coins_for_all_accounts(headless=True):
             if coins is not None:
                 results[account_name] = coins
                 print(f"✅ {account_name}: {coins} 金币")
+                update_account_status(account_name, "金币", coins=coins)
             else:
                 failed_accounts.append(account_name)
                 print(f"❌ {account_name}: 获取金币失败")
@@ -3568,61 +3050,9 @@ def get_coins_for_all_accounts(headless=True):
             failed_accounts.append(account_name)
             print(f"❌ {account_name}: 发生错误 - {str(e)}")
 
-    # 保存最初失败的账号列表
+    # 统一打印汇总结果并发送邮件通知
     final_failed_accounts = failed_accounts.copy()
-
-    # 如果有失败的账号，提示用户手动登录（不再尝试自动登录）
-    if failed_accounts:
-        print("\n" + "=" * 50)
-        print("⚠️  以下账号需要手动登录（登录状态已过期或不存在）:")
-        for account_name in failed_accounts:
-            print(f"   - {account_name}")
-        print("\n💡 请使用以下命令手动登录:")
-        for account_name in failed_accounts:
-            print(f"   python main.py login {account_name}")
-        print("=" * 50)
-
-    # 打印汇总结果
-    if results:
-        print("\n📊 金币统计汇总:")
-        total_coins = sum(results.values())
-        for account_name, coins in results.items():
-            print(f"   ✅ {account_name}: {coins} 金币")
-        print(f"   💰 总计: {total_coins} 金币")
-    
-    # 检查是否需要发送邮件:
-    # 1. 有失败的账号时必须发送
-    # 2. 如果全部成功，则只有周一才发送
-    is_monday = datetime.now().weekday() == 0
-    has_failures = len(final_failed_accounts) > 0
-    should_send_email = has_failures or is_monday
-
-    # 只有在符合发送条件且邮箱配置正确时才发送邮件
-    if should_send_email and EMAIL_HOST and EMAIL_HOST != "smtp.xx.com":
-        total_coins = sum(results.values()) if results else 0
-        
-        # 构建主题
-        subject = "爱壹帆金币统计"
-        if final_failed_accounts:
-            subject += f"({len(final_failed_accounts)}个失败)"
-        
-        # 构建内容
-        content = f"""{datetime.now().strftime('%Y-%m-%d')}
-总金币: {total_coins}
-
-账号统计:
-"""
-        
-        # 添加所有账号
-        all_accounts = sorted(list(set(list(results.keys()) + final_failed_accounts)))
-        for account in all_accounts:
-            if account in results:
-                content += f"✅ {account}: {results[account]}枚\n"
-            else:
-                content += f"❌ {account}: 需要手动登录\n"
-        
-        send_email(subject, content)
-        print("\n✅ 已发送邮件通知")
+    print_coins_summary_and_send_email(results, final_failed_accounts)
 
 def delete_account(account_name):
     """删除账号：移除 account.json 中的凭据、旧版 *_account.json、登录态，并从 accounts.txt 移除（若在该列表中）。"""
