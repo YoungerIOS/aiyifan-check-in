@@ -10,6 +10,7 @@ import random
 import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
+from email.utils import formatdate, make_msgid, formataddr
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import traceback
 import contextlib
@@ -1294,6 +1295,13 @@ def get_today_account_coins(account_name, date_str=None):
     return None
 
 
+def natural_sort_key(s):
+    """
+    自然排序键函数，将字符串中的数字提取为整数排序，确保 yifan2 排在 yifan10 之前。
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
+
 def print_coins_summary_and_send_email(results, failed_accounts=None):
     """
     统一打印金币汇总结果并根据规则触发邮件通知。
@@ -1315,11 +1323,11 @@ def print_coins_summary_and_send_email(results, failed_accounts=None):
             print(f"   python main.py login {account_name}")
         print("=" * 50)
 
-    # 打印汇总结果
+    # 打印汇总结果（按自然序号 yifan1, yifan2, ... 严格排序）
     if results:
         print("\n📊 金币统计汇总:")
         total_coins = sum(results.values())
-        for account_name in sorted(results.keys()):
+        for account_name in sorted(results.keys(), key=natural_sort_key):
             print(f"   ✅ {account_name}: {results[account_name]} 金币")
         print(f"   💰 总计: {total_coins} 金币")
 
@@ -1345,13 +1353,13 @@ def print_coins_summary_and_send_email(results, failed_accounts=None):
 
 账号统计:
 """
-        # 添加所有账号
-        all_accounts = sorted(list(set(list(results.keys()) + failed_accounts)))
+        # 添加所有账号（按自然序号严格排序）
+        all_accounts = sorted(list(set(list(results.keys()) + failed_accounts)), key=natural_sort_key)
         for account in all_accounts:
             if account in results:
-                content += f"✅ {account}: {results[account]}枚\n"
+                content += f"✅ {account}:  {results[account]} 金币\n"
             else:
-                content += f"❌ {account}: 需要手动登录\n"
+                content += f"❌ {account}:  需要手动登录\n"
         
         send_email(subject, content)
         print("\n✅ 已发送邮件通知")
@@ -3133,11 +3141,13 @@ def send_email(subject, content):
             logging.warning("邮件配置不完整，跳过发送邮件")
             return
 
-        # 创建邮件内容
+        # 创建邮件内容（严格遵循 RFC 5322 规范，补齐 Date 与 Message-ID 等防垃圾拦截标准头）
         msg = MIMEText(content, 'plain', 'utf-8')
-        msg['From'] = EMAIL_USER
-        msg['To'] = EMAIL_TO
+        msg['From'] = formataddr((Header('爱壹帆助手', 'utf-8').encode(), EMAIL_USER))
+        msg['To'] = formataddr((Header('爱壹帆用户', 'utf-8').encode(), EMAIL_TO))
         msg['Subject'] = Header(subject, 'utf-8')
+        msg['Date'] = formatdate(localtime=True)
+        msg['Message-ID'] = make_msgid(domain='qq.com')
         
         # 记录邮件发送尝试
         logging.info(f"尝试发送邮件: 从 {EMAIL_USER} 到 {EMAIL_TO}")
