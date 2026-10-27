@@ -16,6 +16,7 @@ import traceback
 import contextlib
 import io
 import subprocess
+import builtins
 
 
 def short_error(error):
@@ -54,23 +55,57 @@ def play_prompt_sound(sound_name="Glass"):
             pass
 
 
-# 配置日志
+# 项目路径与全局日志配置（标准 logging 体系）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 LOG_PATH = os.path.join(BASE_DIR, "aiyifan.log")
 
-# 为避免在交互环境 / 多次导入时重复添加 handler，先清空根 logger 的已有 handler，
-# 再只添加文件 handler；这样不会向终端输出，也不会重复打印多次。
-root_logger = logging.getLogger()
-for _h in list(root_logger.handlers):
-    root_logger.removeHandler(_h)
+_builtin_print = builtins.print
 
-file_handler = logging.FileHandler(LOG_PATH)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[file_handler],
-)
+
+def print(*args, **kwargs):
+    """
+    标准工程规范桥接：
+    将业务代码中的 print 统一接入 Python 标准 logging 体系，
+    同时输出到终端控制台与 aiyifan.log，无需侵入式重构既有代码。
+    """
+    if 'file' in kwargs and kwargs['file'] is not None and kwargs['file'] not in (sys.stdout, sys.stderr):
+        _builtin_print(*args, **kwargs)
+        return
+    sep = kwargs.get('sep', ' ')
+    msg = sep.join(str(a) for a in args) if args else ''
+    logging.info(msg)
+
+
+def init_logging():
+    """
+    采用业内标准工程规范配置根 logger：
+    - FileHandler(mode='w')：每次启动覆盖上一份日志，仅保留最新一次完整记录；
+    - StreamHandler(sys.stdout)：同步输出至终端控制台；
+    - 适配 launchcontrol/launchd/cron 等定时后台任务无 TTY 环境。
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
+
+    formatter = logging.Formatter('%(message)s')
+
+    file_handler = logging.FileHandler(LOG_PATH, mode='w', encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+
+# 模块导入级默认静默，待 main 入口被调用时通过 init_logging 挂载日志
+logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
 
 # 不再在模块导入时向终端打印环境信息，保持脚本静默
 
@@ -548,8 +583,8 @@ def wait_for_sign_in_section(page, timeout_sec=15):
         already_signed_text = check_already_signed_in_ui(page)
         btn = find_sign_in_button(page)
         
-        # 优先判定：主界面已明确呈现'已签到'且无有效'立即签到'按钮（处于冷却中）
-        if already_signed_text and btn is None:
+        # 优先判定：主界面已明确呈现'已签到'（注意：'已签到'按钮点击仍会弹窗，故直接跳过点击判定完成）
+        if already_signed_text:
             return 'already_signed', already_signed_text
             
         # 待签判定：主界面明确挂载了真实可点击的'立即签到'
@@ -645,45 +680,53 @@ def handle_check_in_dialog(page, timeout_sec=6):
 
 def check_sign_in_success(page, coins_before=None):
     """
-    基于不可伪造的客观事实验证签到是否真正成功。
-    金标准法则（方案三：以金币增加为绝对核心）：
-    在获取到 coins_before 的前提下，【金币资产真实增加】是唯一的成败铁律！
-    若金币未增加，即使页面挂着'已签到'，也绝不承认成功（杜绝把旧状态误当新成果）。
+    基于用户指定的成败准则核验证签到是否成功：
+    【金币增加】或主界面呈现【'已签到'按钮】，二者有其一即可认定签到成功！
+    注意：'已签到'按钮仍可点击且仍会弹出包含'即刻签到'的小窗，绝不可使用小窗内部状态判断；
+    必须严格以个人中心主界面节点为准（已在 check_already_signed_in_ui 中严格排除弹窗小窗容器）。
     """
     try:
         time.sleep(2)
 
-        # 1. 检查金币是否已即时增加
+        # 1. 准则一：检查金币是否已即时增加
         coins_after = get_current_coins(page)
-        if coins_before is not None and coins_after is not None:
-            if coins_after > coins_before:
-                print(f"✅ 金币资产已真实增加：{coins_before} ➡️ {coins_after}（服务端入账铁证）")
-                return True
+        if coins_before is not None and coins_after is not None and coins_after > coins_before:
+            print(f"✅ 金币资产已真实增加：{coins_before} ➡️ {coins_after}（判定签到成功）")
+            return True
 
-        # 2. 若 DOM 未即时更新，刷新个人中心页面进行最终核验
-        print("当前金币尚未刷新，正在刷新个人中心页面进行最终复核...")
+        # 2. 准则二：检查主界面是否已显示'已签到'按钮（严格排除弹窗小窗内元素）
+        if check_already_signed_in_ui(page):
+            print("✅ 个人中心主界面已呈现'已签到'状态（判定签到成功）")
+            return True
+
+        # 3. 若金币未即时变化且主界面暂未翻转，刷新页面（关闭弹窗、重新拉取SPA最新状态）后复核
+        print("当前金币尚未刷新或状态未更新，正在刷新个人中心页面进行最终复核...")
         try:
             page.reload(wait_until="domcontentloaded", timeout=20000)
             time.sleep(3)
 
+            # 复核准则一：金币是否增加
             coins_after_reload = get_current_coins(page)
-            if coins_before is not None and coins_after_reload is not None:
-                if coins_after_reload > coins_before:
-                    print(f"✅ 刷新后确认金币增加：{coins_before} ➡️ {coins_after_reload}（服务端入账铁证）")
-                    return True
-                else:
-                    print(f"❌ 刷新后金币未发生增加：{coins_before} ➡️ {coins_after_reload}，服务端未给予入账（签到未生效）")
-                    return False
+            if coins_before is not None and coins_after_reload is not None and coins_after_reload > coins_before:
+                print(f"✅ 刷新后确认金币增加：{coins_before} ➡️ {coins_after_reload}（判定签到成功）")
+                return True
+
+            # 复核准则二：主界面是否呈现'已签到'
+            if check_already_signed_in_ui(page):
+                print("✅ 刷新后确认主界面呈现'已签到'状态（判定签到成功）")
+                return True
+
+            print(f"❌ 刷新后金币未发生增加（{coins_before} ➡️ {coins_after_reload}），且主界面未呈现'已签到'")
+            return False
         except Exception as e:
             print(f"⚠️ 刷新页面复核出错: {short_error(e)}")
 
-        # 3. 仅在未成功读取 coins_before 的极罕见异常兜底下，才辅助参考 UI 翻转
-        if coins_before is None:
-            if check_already_signed_in_ui(page) and find_sign_in_button(page) is None:
-                print("⚠️ 无法获取基准金币数，仅通过按钮翻转为'已签到'降级判定为完成")
-                return True
+        # 兜底：如果刷新异常，再次快速查验主界面已签到
+        if check_already_signed_in_ui(page):
+            print("✅ 主界面检测到'已签到'状态（判定签到成功）")
+            return True
 
-        print("❌ 未检测到确凿的金币增加入账证据，签到未成功")
+        print("❌ 未检测到金币增加或'已签到'状态，签到未确认成功")
         return False
     except Exception as e:
         print(f"❌ 签到成功核验过程中出错: {short_error(e)}")
@@ -978,40 +1021,84 @@ def share_video(page):
                 return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
             });
 
-            // 确认为爱壹帆网站分享小窗内的 6 大官方平台
+            // 确认为爱壹帆网站分享小窗内的 6 大官方平台（基于强特征白名单精确匹配，无需脆弱黑名单）
             const platformDefs = [
-                { key: 'weibo', name: '微博', matches: (s, t, c) => s.includes('weibo') || s.includes('微博') },
-                { key: 'qq', name: 'QQ', matches: (s, t, c) => s.includes('qq') || s.includes('qzone') || s.includes('connect.qq') },
-                { key: 'wechat', name: '微信', matches: (s, t, c) => s.includes('wechat') || s.includes('weixin') || s.includes('微信') },
-                { key: 'facebook', name: 'Facebook', matches: (s, t, c) => s.includes('facebook') || c.includes('icon-fb') || c.includes('share-fb') },
-                { key: 'x', name: 'X', matches: (s, t, c) => s.includes('twitter') || s.includes('x.com') || s.includes('推特') || s.includes('分享到x') || t === 'x' || c.includes('icon-x') },
-                { key: 'telegram', name: 'Telegram', matches: (s, t, c) => s.includes('telegram') || s.includes('t.me') || s.includes('电报') }
+                { 
+                    key: 'weibo', 
+                    name: '微博', 
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('weibo') || t.includes('weibo') || t.includes('微博') || 
+                        a.includes('微博') || a.includes('weibo') || alt.includes('微博') || alt.includes('weibo') || 
+                        h.includes('weibo') || txt === '微博' || txt === '分享到微博'
+                },
+                { 
+                    key: 'qq', 
+                    name: 'QQ', 
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('qq') || c.includes('qzone') || 
+                        t.includes('qq') || a.includes('qq') || alt.includes('qq') || 
+                        h.includes('qq.com') || h.includes('connect.qq') || h.includes('qzone') || 
+                        txt === 'qq' || txt === '分享到qq'
+                },
+                { 
+                    key: 'wechat', 
+                    name: '微信', 
+                    // 严格限制：仅匹配类名/标准属性/纯文本全等，杜绝海报中"使用微信扫码观看"等长文案泛匹配
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('wechat') || c.includes('weixin') || c.includes('icon-wx') || 
+                        t === '微信' || t === '分享到微信' || t.includes('wechat') || t.includes('weixin') ||
+                        a === '微信' || a === '分享到微信' || a.includes('wechat') || a.includes('weixin') ||
+                        alt === '微信' || alt === '分享到微信' ||
+                        txt === '微信' || txt === '分享到微信'
+                },
+                { 
+                    key: 'facebook', 
+                    name: 'Facebook', 
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('facebook') || c.includes('icon-fb') || c.includes('share-fb') || 
+                        t.includes('facebook') || a.includes('facebook') || alt.includes('facebook') || 
+                        h.includes('facebook.com') || txt === 'facebook' || txt === '分享到facebook'
+                },
+                { 
+                    key: 'x', 
+                    name: 'X', 
+                    // 严格限制：匹配 twitter/x.com/分享到x，单字符 x 仅限全等，杜绝动漫剧名中含 x 的误判
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('twitter') || c.includes('icon-x') || 
+                        t.includes('twitter') || t.includes('x.com') || t.includes('分享到x') || t.includes('推特') || t === 'x' ||
+                        a.includes('twitter') || a.includes('分享到x') || a.includes('推特') || a === 'x' ||
+                        alt.includes('twitter') || alt.includes('分享到x') || alt === 'x' ||
+                        h.includes('twitter.com') || h.includes('x.com') || 
+                        txt === 'x' || txt === 'twitter' || txt === '分享到x'
+                },
+                { 
+                    key: 'telegram', 
+                    name: 'Telegram', 
+                    matches: (c, t, a, alt, h, txt) => 
+                        c.includes('telegram') || 
+                        t.includes('telegram') || t.includes('电报') || 
+                        a.includes('telegram') || a.includes('电报') || 
+                        alt.includes('telegram') || alt.includes('电报') || 
+                        h.includes('telegram') || h.includes('t.me') || 
+                        txt === 'telegram' || txt === '电报' || txt === '分享到telegram'
+                }
             ];
-
-            const badWords = ['二维码', '立刻观看', '海量', '评分', '暂无评分', '关闭', 'close', '×', '看《', '快来和我', '万', '分', '免费在线观看'];
 
             const list = [];
             for (const d of dialogs) {
                 const items = Array.from(d.querySelectorAll('a, button, [role="button"], [class*="icon"], img, svg, div, span'));
                 for (const item of items) {
                     if (item.offsetWidth === 0 || item.offsetHeight === 0) continue;
-                    const text = (item.innerText || item.textContent || '').trim();
-                    if (text.length > 25) continue;
-                    if (badWords.some(b => text.includes(b))) continue;
 
-                    const href = (item.getAttribute('href') || '').toLowerCase();
                     const cls = (item.className ? String(item.className) : '').toLowerCase();
-                    const title = (item.getAttribute('title') || '').toLowerCase();
-                    const aria = (item.getAttribute('aria-label') || '').toLowerCase();
-                    const alt = (item.getAttribute('alt') || '').toLowerCase();
-
-                    if (badWords.some(b => cls.includes(b) || aria.includes(b) || title.includes(b))) continue;
-
-                    const combined = (title + ' ' + aria + ' ' + alt + ' ' + href + ' ' + cls + ' ' + text).toLowerCase();
-                    const t = text.toLowerCase();
+                    const title = (item.getAttribute('title') || '').toLowerCase().trim();
+                    const aria = (item.getAttribute('aria-label') || '').toLowerCase().trim();
+                    const alt = (item.getAttribute('alt') || '').toLowerCase().trim();
+                    const href = (item.getAttribute('href') || '').toLowerCase().trim();
+                    const text = (item.innerText || item.textContent || '').toLowerCase().trim();
 
                     for (const p of platformDefs) {
-                        if (p.matches(combined, t, cls)) {
+                        if (p.matches(cls, title, aria, alt, href, text)) {
                             const target = item.closest('a, button, [role="button"]') || item;
                             target.setAttribute('data-target-share-platform', p.key);
                             list.push({
@@ -1023,6 +1110,35 @@ def share_video(page):
                             });
                             break;
                         }
+                    }
+                }
+            }
+
+            // 兜底逻辑：仅在 6 大平台未能正向识别时触发（基于几何尺寸与语义排除关闭按钮）
+            if (list.length === 0) {
+                for (const d of dialogs) {
+                    const fallbackIcons = Array.from(d.querySelectorAll('a, button, [role="button"], [class*="icon"], img, svg')).filter(el => {
+                        if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
+                        // 几何尺寸防御：真实分享图标通常在 20~80px 之间，大卡片容器通常 > 90px
+                        if (el.offsetWidth > 90 || el.offsetHeight > 90) return false;
+                        // 关闭按钮语义防御
+                        const c = (el.className ? String(el.className) : '').toLowerCase();
+                        const t = (el.innerText || '').trim();
+                        const a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (c.includes('close') || a.includes('close') || t === '×' || t === '关闭') return false;
+                        return true;
+                    });
+                    for (const ic of fallbackIcons) {
+                        const target = ic.closest('a, button, [role="button"]') || ic;
+                        const k = (ic.getAttribute('title') || ic.className || ic.tagName).toLowerCase();
+                        target.setAttribute('data-target-share-platform', k);
+                        list.push({
+                            key: k,
+                            name: ic.getAttribute('title') || ic.innerText || '分享图标',
+                            displayName: ic.getAttribute('title') || ic.innerText || '分享图标',
+                            href: target.getAttribute('href') || '',
+                            hasHref: Boolean(target.getAttribute('href') && target.getAttribute('href') !== '#' && target.getAttribute('href') !== 'javascript:;')
+                        });
                     }
                 }
             }
@@ -1206,6 +1322,12 @@ def update_account_status(account_name, operation_type, success=True, time_str=N
     """
     就地更新今日表格中指定账号的操作状态、执行时间以及最新金币数。
     格式: yifan1 - 签到: ✅（13:22:24） --- 分享: ✅（15:20:48） --- 金币: 1828
+    状态标识:
+      - 成功: ✅（HH:MM:SS）
+      - 失败: ❌（HH:MM:SS）
+      - 登录失效: 🔐（HH:MM:SS）
+      - 忽略: ⏭️ 已忽略
+      - 未执行: ⏳ 未执行
     """
     now = datetime.now()
     if not date_str:
@@ -1219,7 +1341,13 @@ def update_account_status(account_name, operation_type, success=True, time_str=N
     if not os.path.exists(filename):
         init_today_status_file(date_str=date_str)
 
-    status_badge = f"✅（{time_str}）" if success else f"❌（{time_str}）"
+    # 确定状态标识：登录失效用 🔐，成功用 ✅，失败用 ❌
+    if success in ('expired', 'login_required', 'session_expired', 'login_failed'):
+        status_badge = f"🔐（{time_str}）"
+    elif success is True or success == 'success':
+        status_badge = f"✅（{time_str}）"
+    else:
+        status_badge = f"❌（{time_str}）"
 
     try:
         with open(filename, 'r', encoding='utf-8') as f:
@@ -1248,6 +1376,9 @@ def update_account_status(account_name, operation_type, success=True, time_str=N
                 signin_part = status_badge
             elif operation_type == '分享':
                 share_part = status_badge
+            elif operation_type in ('登录失效', 'login_expired', 'all_expired'):
+                signin_part = status_badge
+                share_part = status_badge
             elif operation_type == '金币':
                 coins_part = str(coins) if coins is not None else status_badge
 
@@ -1259,8 +1390,8 @@ def update_account_status(account_name, operation_type, success=True, time_str=N
             updated_lines.append(line)
 
     if not account_found:
-        signin_part = status_badge if operation_type == '签到' else "⏳ 未执行"
-        share_part = status_badge if operation_type == '分享' else "⏳ 未执行"
+        signin_part = status_badge if operation_type in ('签到', '登录失效', 'login_expired', 'all_expired') else "⏳ 未执行"
+        share_part = status_badge if operation_type in ('分享', '登录失效', 'login_expired', 'all_expired') else "⏳ 未执行"
         coins_part = str(coins) if coins is not None else "⏳ 未获取"
         new_line = f"{account_name} - 签到: {signin_part} --- 分享: {share_part} --- 金币: {coins_part}\n"
         updated_lines.append(new_line)
@@ -1302,65 +1433,108 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 
-def print_coins_summary_and_send_email(results, failed_accounts=None):
+def print_coins_summary_and_send_email(results=None, failed_accounts=None, date_str=None):
     """
-    统一打印金币汇总结果并根据规则触发邮件通知。
+    统一打印打卡表格汇总结果并根据规则触发邮件通知。
+    直接将 account_data/shared/<YYYY-MM-DD>_status.txt 的原格式内容作为邮件主体发送。
+    状态符号标识：
+      - ✅: 成功
+      - ❌: 失败（操作异常/超时等）
+      - 🔐: 登录失效（需重新手动登录）
+      - ⏭️: 已忽略
+      - ⏳: 未执行
     邮件发送规则：
-    1. 有失败的账号时必须发送
-    2. 如果全部成功，则只有周一才发送
+      1. 存在任何失败 (❌) 或登录失效 (🔐) 的账号时必须发送告警邮件；
+      2. 若全部成功无异常，则只有周一才发送周报邮件。
     """
-    if failed_accounts is None:
-        failed_accounts = []
+    if not date_str:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    filename = get_today_status_file_path(date_str)
 
-    # 如果有失败的账号，提示用户手动登录
-    if failed_accounts:
+    status_lines = []
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            status_lines = [line.rstrip() for line in f if line.strip()]
+
+    # 统计总金币与异常账号
+    total_coins = 0
+    expired_accounts = []
+    failed_ops_accounts = []
+
+    for line in status_lines:
+        m_coin = re.search(r'金币[:：]\s*(\d+)', line)
+        if m_coin:
+            total_coins += int(m_coin.group(1))
+
+        m_acc = re.match(r'^([a-zA-Z0-9_-]+)\s*-', line)
+        acc_name = m_acc.group(1) if m_acc else ""
+
+        if "🔐" in line:
+            if acc_name and acc_name not in expired_accounts:
+                expired_accounts.append(acc_name)
+        if "❌" in line:
+            if acc_name and acc_name not in failed_ops_accounts:
+                failed_ops_accounts.append(acc_name)
+
+    # 兼容兜底：如果 status_lines 为空而 results 有值
+    if not status_lines and results:
+        for acc in sorted(results.keys(), key=natural_sort_key):
+            status_lines.append(f"{acc} - 金币: {results[acc]}")
+        total_coins = sum(results.values())
+
+    # 终端打印输出汇总
+    print("\n" + "=" * 60)
+    print("📊 今日打卡状态汇总:")
+    for line in status_lines:
+        print(f"   {line}")
+    print(f"💰 总计金币: {total_coins}")
+    print("=" * 60)
+
+    # 如果存在登录失效账号，特别提示执行 login 命令
+    if expired_accounts:
         print("\n" + "=" * 50)
-        print("⚠️  以下账号需要手动登录（登录状态已过期或操作失败）:")
-        for account_name in failed_accounts:
-            print(f"   - {account_name}")
+        print("🔐 以下账号登录失效，需要手动登录:")
+        for acc in expired_accounts:
+            print(f"   - {acc}")
         print("\n💡 请使用以下命令手动登录:")
-        for account_name in failed_accounts:
-            print(f"   python main.py login {account_name}")
+        for acc in expired_accounts:
+            print(f"   python main.py login {acc}")
         print("=" * 50)
 
-    # 打印汇总结果（按自然序号 yifan1, yifan2, ... 严格排序）
-    if results:
-        print("\n📊 金币统计汇总:")
-        total_coins = sum(results.values())
-        for account_name in sorted(results.keys(), key=natural_sort_key):
-            print(f"   ✅ {account_name}: {results[account_name]} 金币")
-        print(f"   💰 总计: {total_coins} 金币")
-
-    # 检查是否需要发送邮件:
-    # 1. 有失败的账号时必须发送
-    # 2. 如果全部成功，则只有周一才发送
+    # 邮件发送规则判定：
+    # 1. 存在失败 (❌) 或登录失效 (🔐) 时必须发送告警邮件；
+    # 2. 全员正常无异常时，仅周一发送周报邮件。
     is_monday = datetime.now().weekday() == 0
-    has_failures = len(failed_accounts) > 0
+    total_abnormal = len(set(expired_accounts + failed_ops_accounts))
+    has_failures = total_abnormal > 0
     should_send_email = has_failures or is_monday
 
-    # 只有在符合发送条件且邮箱配置正确时才发送邮件
     if should_send_email and EMAIL_HOST and EMAIL_HOST != "smtp.xx.com":
-        total_coins = sum(results.values()) if results else 0
-        
-        # 构建主题
-        subject = "爱壹帆金币统计"
-        if failed_accounts:
-            subject += f"({len(failed_accounts)}个失败)"
-        
-        # 构建内容
-        content = f"""{datetime.now().strftime('%Y-%m-%d')}
+        subject = "爱壹帆打卡汇总"
+        if has_failures:
+            subject += f"({total_abnormal}个异常)"
+        else:
+            subject += "(全部完成)"
+
+        # 构建邮件内容：原格式状态明细表格
+        status_table_str = "\n".join(status_lines)
+        content = f"""{date_str}
 总金币: {total_coins}
 
-账号统计:
+账号打卡状态明细:
+{status_table_str}
 """
-        # 添加所有账号（按自然序号严格排序）
-        all_accounts = sorted(list(set(list(results.keys()) + failed_accounts)), key=natural_sort_key)
-        for account in all_accounts:
-            if account in results:
-                content += f"✅ {account}:  {results[account]} 金币\n"
-            else:
-                content += f"❌ {account}:  需要手动登录\n"
-        
+        if expired_accounts:
+            login_cmds = "\n".join(f"python main.py login {acc}" for acc in expired_accounts)
+            content += f"""
+🔐 以下账号登录失效，请使用以下命令手动登录:
+{login_cmds}
+"""
+        elif failed_ops_accounts:
+            content += """
+ℹ️ 提示：请查看上方明细中标记为 ❌ 的具体项目。
+"""
+
         send_email(subject, content)
         print("\n✅ 已发送邮件通知")
 
@@ -1443,7 +1617,7 @@ def run_check_in_for_account(account_name, headless=False):
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
         print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
-        update_account_status(account_name, '签到', success=False)
+        update_account_status(account_name, '签到', success='expired')
         return False
     
     with sync_playwright() as p:
@@ -1456,13 +1630,13 @@ def run_check_in_for_account(account_name, headless=False):
             try:
                 if not load_storage_state(context, state_file):
                     browser.close()
-                    update_account_status(account_name, '签到', success=False)
+                    update_account_status(account_name, '签到', success='expired')
                     return False
                 print(f"✅ 已加载账号 '{account_name}' 的登录状态")
             except Exception as e:
                 print(f"❌ 加载账号状态失败: {short_error(e)}")
                 browser.close()
-                update_account_status(account_name, '签到', success=False)
+                update_account_status(account_name, '签到', success='expired')
                 return False
             
             page = context.new_page()
@@ -1478,7 +1652,7 @@ def run_check_in_for_account(account_name, headless=False):
             if not check_login_status(page):
                 print("❌ 登录状态失效，请重新登录")
                 browser.close()
-                update_account_status(account_name, '签到', success=False)
+                update_account_status(account_name, '签到', success='expired')
                 return False
             
             # 动态轮询等待签到模块异步数据挂载（最长等待 15 秒）
@@ -1527,12 +1701,20 @@ def run_check_in_for_account(account_name, headless=False):
             for attempt in range(1, max_attempts + 1):
                 print(f"\n----- 签到尝试 {attempt}/{max_attempts} -----")
                 if attempt > 1:
+                    # 重试前优先检查主界面是否已显示'已签到'（第 1 次点击可能已在后台完成生效）
+                    if check_already_signed_in_ui(page):
+                        print("✅ 主界面已呈现'已签到'状态（判定签到成功）")
+                        coins_after = get_current_coins(page)
+                        update_account_status(account_name, "签到", success=True, coins=coins_after or coins_before)
+                        sign_in_success = True
+                        break
+
                     # 重试时重新定位按钮
                     sign_btn = find_sign_in_button(page)
                     if not sign_btn:
-                        # 尝试2未找到按钮时，必须确凿核验金币增加才认可成功
+                        # 尝试2未找到待签按钮，核验金币增加或主界面呈现已签到
                         if check_sign_in_success(page, coins_before):
-                            print("✅ 签到成功（金币资产已确认增加）")
+                            print("✅ 签到成功（满足金币增加或已签到条件）")
                             coins_after = get_current_coins(page)
                             update_account_status(account_name, "签到", success=True, coins=coins_after or coins_before)
                             sign_in_success = True
@@ -1602,7 +1784,7 @@ def run_share_video_for_account(account_name, headless=False):
     state_file = os.path.join(data_dir, f"{account_name}_storage.json")
     if not os.path.exists(state_file):
         print(f"❌ 账号 '{account_name}' 的登录状态文件不存在")
-        update_account_status(account_name, "分享", success=False)
+        update_account_status(account_name, "分享", success='expired')
         return False
     
     session_expired = False
@@ -1622,11 +1804,13 @@ def run_share_video_for_account(account_name, headless=False):
                 # 加载保存的状态
                 try:
                     if not load_storage_state(context, state_file):
+                        session_expired = True
                         browser.close()
                         return False
                     print(f"✅ 已加载账号 '{account_name}' 的登录状态")
                 except Exception as e:
                     print(f"❌ 加载账号状态失败: {short_error(e)}")
+                    session_expired = True
                     browser.close()
                     return False
                 
@@ -1702,7 +1886,10 @@ def run_share_video_for_account(account_name, headless=False):
         success = try_share_with_mode(True)
     
     if not success:
-        update_account_status(account_name, "分享", success=False)
+        if session_expired:
+            update_account_status(account_name, "分享", success='expired')
+        else:
+            update_account_status(account_name, "分享", success=False)
     
     return success
 
@@ -3179,8 +3366,8 @@ def send_email(subject, content):
         import traceback
         logging.error(traceback.format_exc())
 
-def main():
-    """主函数，处理命令行参数"""
+def run_cli_command():
+    """解析并执行命令行命令"""
     # 检查是否有足够的参数
     if len(sys.argv) < 2:
         show_help()
@@ -3338,6 +3525,37 @@ def main():
     else:
         print(f"❌ 未知命令: {command}")
         show_help()
+
+
+def main():
+    """主入口函数：初始化标准工程日志并执行命令。"""
+    init_logging()
+    start_time = datetime.now()
+    cmd_str = ' '.join(sys.argv)
+
+    print("=" * 60)
+    print(f"🕒 任务启动时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"💻 执行命令参数: {cmd_str}")
+    print(f"📁 项目工作目录: {BASE_DIR}")
+    print("=" * 60 + "\n")
+
+    try:
+        run_cli_command()
+    except Exception:
+        logging.exception("❌ 执行过程中发生严重未捕获异常:")
+        raise
+    finally:
+        end_time = datetime.now()
+        duration = end_time - start_time
+        total_seconds = int(duration.total_seconds())
+        minutes, seconds = divmod(total_seconds, 60)
+        dur_str = f"{minutes}分{seconds}秒" if minutes > 0 else f"{seconds}秒"
+
+        print("\n" + "=" * 60)
+        print(f"🏁 任务结束时间: {end_time.strftime('%Y-%m-%d %H:%M:%S')} (总耗时: {dur_str})")
+        print("=" * 60)
+        logging.shutdown()
+
 
 if __name__ == "__main__":
     main()
