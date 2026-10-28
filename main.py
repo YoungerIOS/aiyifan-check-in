@@ -170,56 +170,58 @@ YFSP_BUILTIN_LOGIN_CSS_FALLBACKS = (
 )
 
 
-def check_login_status(page):
+def check_login_status(page, verbose=False):
     """
-    检查页面当前是否处于登录状态。
-    可靠性准则：必须以正向凭据为准，坚决不使用‘未见登录按钮即算登录’的负向猜测逻辑。
+    检查页面当前是否处于真实有效的已登录状态。
+    可靠性准则：
+    1. 若登录 iframe 或登录小窗仍处于可见状态，表明用户尚在填写/滑动验证阶段，坚决判定为未登录。
+    2. 必须以确凿的正向凭据为准（个人中心资产、非空用户名、退出登录入口、或持有有效服务端 dn_token 会话 Cookie）。
+    3. 严禁使用普通访客也具备的匿名头像（如 [class*="avatar"] / div.user-avatar）作为登录判定依据。
     """
     try:
-        print("正在检查登录状态...")
+        # 0. 防御：如果登录 iframe 在 DOM 中且可见，说明用户正在人机验证或表单填写中
+        try:
+            iframe_loc = page.locator('iframe#Dn_Login_Iframe, iframe[src*="login"], iframe[id*="login"]').first
+            if iframe_loc and iframe_loc.count() > 0 and iframe_loc.is_visible():
+                return False
+        except Exception:
+            pass
 
         # 1. 如果当前在个人中心路由，优先通过个人资产/金币元素确凿判定
-        if "user" in page.url.lower():
+        if "user" in (page.url or "").lower():
             user_assets = page.locator('div[title="金币"], [class*="coin"], .user-info, .user-card').first
-            if user_assets.count() > 0 and user_assets.is_visible():
-                print("✅ 个人中心检测到有效资产/用户信息，确认已登录")
+            if user_assets and user_assets.count() > 0 and user_assets.is_visible():
+                if verbose:
+                    print("✅ 个人中心检测到有效资产/用户信息，确认已登录")
                 return True
 
-        # 2. 尝试获取非 unknown 的登录用户名
+        # 2. 尝试获取非 unknown 的真实登录用户名
         username = get_username(page)
-        if username and username not in ("unknown", "unknown_user", ""):
-            print(f"✅ 检测到登录用户名: {username}")
+        if username and username not in ("unknown", "unknown_user", "", "登录", "注册"):
+            if verbose:
+                print(f"✅ 检测到登录用户名: {username}")
             return True
 
-        # 3. 尝试查找用户头像 / 已登录用户卡片
-        user_avatar = page.locator('div.user-avatar:visible, div.avatar.logged-in, img.avatar[src*="avatar"], .user-profile:visible, [class*="avatar"]:visible').first
-        if user_avatar and user_avatar.count() > 0:
-            try:
-                if user_avatar.is_visible():
-                    print("✅ 检测到已登录头像元素")
-                    return True
-            except Exception:
-                pass
-
-        # 4. 检查是否有明确的退出登录入口（只有已登录才会出现）
+        # 3. 检查是否有明确的退出登录入口（只有已登录才会出现）
         logout_btn = page.locator('a:has-text("退出"), button:has-text("退出"), [href*="logout"]').first
         if logout_btn and logout_btn.count() > 0 and logout_btn.is_visible():
-            print("✅ 检测到退出登录按钮，确认已登录")
+            if verbose:
+                print("✅ 检测到退出登录按钮，确认已登录")
             return True
 
-        # 5. 检查明确的未登录标志（顶栏或页面上有登录/注册入口）
-        login_button = page.locator('button:has-text("登录"), a:has-text("登录"), span:has-text("登录"), div.user-block:has-text("登录"), [class*="login"]:visible').first
-        if login_button and login_button.count() > 0 and login_button.is_visible():
-            print("❌ 检测到登录入口元素，当前为未登录状态")
-            return False
+        # 4. 检查客户端是否已持有爱壹帆权威的服务端会话 Cookie (dn_token)
+        # 每一个已成功登录爱壹帆的账号均持有服务端的 dn_token；未登录的访客绝无此 Cookie
+        try:
+            cookies = page.context.cookies()
+            has_token = any(c.get('name') == 'dn_token' and len(c.get('value', '')) > 5 for c in cookies)
+            if has_token:
+                if verbose:
+                    print("✅ 检测到有效服务端会话凭据 (dn_token)，确认已登录")
+                return True
+        except Exception:
+            pass
 
-        register_button = page.locator('button:has-text("注册"), a:has-text("注册"), [class*="register"]:visible').first
-        if register_button and register_button.count() > 0 and register_button.is_visible():
-            print("❌ 检测到注册入口元素，当前为未登录状态")
-            return False
-
-        # 6. 安全兜底：未找到任何有效登录凭证时，坚决判定为未登录（彻底杜绝假阳性）
-        print("❌ 未检测到有效登录凭据（无用户名、无头像、无资产数据），判定为未登录")
+        # 5. 安全兜底：未找到任何有效登录凭据时，坚决判定为未登录
         return False
 
     except Exception as e:
@@ -247,9 +249,16 @@ def verify_account_session(page, timeout_ms=25000):
 
         time.sleep(2.5)
 
-        # 1. 检查是否重定向离开了个人中心
+        # 1. 检查是否重定向离开了个人中心（若首次打开被弹回首页，给予一次重试重新导航）
         if "user" not in page.url.lower():
-            return False
+            time.sleep(1.5)
+            try:
+                page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
+                time.sleep(2.5)
+            except Exception:
+                pass
+            if "user" not in page.url.lower():
+                return False
 
         # 2. 检查个人中心核心资产元素或用户资料元素
         has_assets = page.evaluate("""() => {
@@ -423,33 +432,128 @@ def logout(page):
         print(f"❌ 登出失败: {str(e)}")
         return False
 
-def get_current_coins(page):
+def get_current_coins(page, timeout_sec=4):
     """
     从个人中心页面提取当前账号的金币数量，若无法获取则返回 None。
+    支持短暂轮询等待（默认最多 4 秒），确保 SPA 接口完成金币数字的异步渲染。
     使用爱壹帆页面标准的 div[title='金币'] 定位器及正则提取纯数字。
     """
-    try:
-        coins_el = page.locator('div[title="金币"], [class*="coin"]').first
-        if coins_el and coins_el.count() > 0 and coins_el.is_visible():
-            text = coins_el.inner_text()
-            match = re.search(r'\d+', text)
-            if match:
-                return int(match.group())
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        try:
+            coins_el = page.locator('div[title="金币"], [class*="coin"]').first
+            if coins_el and coins_el.count() > 0 and coins_el.is_visible():
+                text = coins_el.inner_text()
+                match = re.search(r'\d+', text)
+                if match:
+                    return int(match.group())
 
-        # JavaScript 兜底查询
-        coins_data = page.evaluate('''() => {
-            const coinDiv = document.querySelector('div[title="金币"], [class*="coin"]');
-            if (coinDiv) {
-                return coinDiv.textContent.trim();
-            }
-            return null;
-        }''')
-        if coins_data:
-            match = re.search(r'\d+', coins_data)
-            if match:
-                return int(match.group())
-    except Exception as e:
-        print(f"⚠️ 读取当前金币数量异常: {short_error(e)}")
+            # JavaScript 兜底查询
+            coins_data = page.evaluate('''() => {
+                const coinDiv = document.querySelector('div[title="金币"], [class*="coin"]');
+                if (coinDiv) {
+                    return coinDiv.textContent.trim();
+                }
+                return null;
+            }''')
+            if coins_data:
+                match = re.search(r'\d+', coins_data)
+                if match:
+                    return int(match.group())
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return None
+
+
+def get_share_task_status(page, timeout_sec=5):
+    """
+    在个人中心每日任务列表中，精准提取“分享视频给好友”卡片的当前状态（'已完成' / '待完成' / '去完成'）。
+    支持最多 timeout_sec 秒的轻量轮询等待，确保 SPA 异步接口完成每日任务列表的渲染挂载。
+    基于实测通过的叶子节点流提取算法（在'分享视频给好友'后紧跟的首个状态词即为其真实状态）。
+    """
+    start_time = time.time()
+    last_items = []
+
+    # 适当平滑滚动触发页面可见区域的懒加载与挂载（个人中心任务列表通常位于首屏下方）
+    try:
+        page.evaluate("window.scrollTo(0, 350)")
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    while time.time() - start_time < timeout_sec:
+        try:
+            res = page.evaluate('''() => {
+                const items = [];
+                const allEls = Array.from(document.querySelectorAll('*'));
+                
+                // 1. 优先尝试独立卡片局部范围精准匹配
+                for (const el of allEls) {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) continue;
+                    const text = (el.innerText || '').trim();
+                    if (text.includes('分享视频') && text.length < 80 && !text.includes('上传视频') && !text.includes('每日签到')) {
+                        const candidates = Array.from(el.querySelectorAll('button, a, div, span, p'));
+                        for (const cand of candidates) {
+                            const ct = (cand.innerText || cand.textContent || '').replace(/\\s+/g, '');
+                            if (ct === '已完成' || ct === '待完成' || ct === '去完成') {
+                                return { status: ct, items: [ct] };
+                            }
+                        }
+                    }
+                }
+
+                // 2. 线上验证的绝对次序文档流提取（平铺列表/无外框卡片模式）
+                allEls.forEach(el => {
+                    if (el.offsetWidth === 0 || el.offsetHeight === 0) return;
+                    const raw = (el.innerText || '').trim();
+                    if (!raw) return;
+                    const clean = raw.replace(/\\s+/g, '');
+
+                    // 收集状态按钮（如 '已完成' / '待完成' / '去完成'）
+                    if (clean === '已完成' || clean === '待完成' || clean === '去完成') {
+                        if (items.length === 0 || items[items.length - 1] !== clean) {
+                            items.push(clean);
+                        }
+                    } else if (el.children.length === 0 && clean.includes('分享') && clean.length < 25) {
+                        // 收集包含'分享'的叶子文本
+                        if (items.length === 0 || items[items.length - 1] !== clean) {
+                            items.push(clean);
+                        }
+                    }
+                });
+
+                // 在 items 中定位'分享'项
+                const shareIdx = items.findIndex(item => item.includes('分享'));
+                if (shareIdx !== -1) {
+                    for (let i = shareIdx + 1; i < items.length; i++) {
+                        const next = items[i];
+                        if (next === '已完成' || next === '待完成' || next === '去完成') {
+                            return { status: next, items: items };
+                        }
+                    }
+                }
+
+                // 3. 页面渲染纯文本正则兜底
+                const bodyText = (document.body.innerText || '').replace(/\\s+/g, ' ');
+                const match = bodyText.match(/分享视频[^\w\u4e00-\u9fa5]{0,15}[\u4e00-\u9fa5\w\\s+]{0,100}?(已完成|待完成|去完成)/);
+                if (match && match[1]) {
+                    return { status: match[1], items: items };
+                }
+
+                return { status: null, items: items };
+            }''')
+
+            if res and res.get('status'):
+                return res['status']
+            if res and res.get('items'):
+                last_items = res['items']
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    if last_items:
+        print(f"ℹ️ 个人中心当前抓取到的任务状态项: {last_items}")
     return None
 
 
@@ -562,37 +666,53 @@ def check_already_signed_in_ui(page):
         return None
 
 
-def wait_for_sign_in_section(page, timeout_sec=15):
+def wait_for_sign_in_section(page, timeout_sec=12, max_attempts=2):
     """
     动态轮询等待个人中心单页应用(SPA)完成用户资产与签到组件的异步渲染。
-    优先级法则（方案二）：
-    1. 优先查验主界面是否已经是灰色的'已签到'。若已签到且无高亮待签按钮，直接判定此前已签/冷却中，绝不进行盲目点击。
-    2. 若未签到，且主界面明确挂载了真实可见的'立即签到'，返回待签按钮。
+    优先级法则：
+    1. 优先查验主界面是否已显示'已签到'。若已显示直接返回'already_signed'；
+    2. 若未签到，查验主界面真实可见的'立即签到'按钮，返回'ready_to_sign'；
+    3. 支持自动刷新重试机制：若首次等待超时（如海外网络丢包导致 SPA 路由分包卡死），
+       自动触发页面重新加载并二次轮询，极大提升对网络抖动的抗干扰能力。
     """
-    start_time = time.time()
-    
-    # 适当平滑滚动触发页面可见区域的懒加载与挂载
-    try:
-        page.evaluate("window.scrollTo(0, 300)")
-        time.sleep(0.5)
-        page.evaluate("window.scrollTo(0, 0)")
-    except Exception:
-        pass
+    for attempt in range(1, max_attempts + 1):
+        start_time = time.time()
+        
+        # 适当平滑滚动触发页面可见区域的懒加载与挂载
+        try:
+            page.evaluate("window.scrollTo(0, 300)")
+            time.sleep(0.5)
+            page.evaluate("window.scrollTo(0, 0)")
+        except Exception:
+            pass
 
-    while time.time() - start_time < timeout_sec:
-        already_signed_text = check_already_signed_in_ui(page)
-        btn = find_sign_in_button(page)
-        
-        # 优先判定：主界面已明确呈现'已签到'（注意：'已签到'按钮点击仍会弹窗，故直接跳过点击判定完成）
-        if already_signed_text:
-            return 'already_signed', already_signed_text
+        while time.time() - start_time < timeout_sec:
+            already_signed_text = check_already_signed_in_ui(page)
+            btn = find_sign_in_button(page)
             
-        # 待签判定：主界面明确挂载了真实可点击的'立即签到'
-        if btn is not None:
-            return 'ready_to_sign', btn
+            # 优先判定：主界面已明确呈现'已签到'（注意：'已签到'按钮点击仍会弹窗，故直接跳过点击判定完成）
+            if already_signed_text:
+                return 'already_signed', already_signed_text
+                
+            # 待签判定：主界面明确挂载了真实可点击的'立即签到'
+            if btn is not None:
+                return 'ready_to_sign', btn
+                
+            time.sleep(1)
+
+        # 本轮超时，若还有重试机会则进行页面重新加载重试
+        if attempt < max_attempts:
+            print(f"⚠️ 个人中心签到区域未在 {timeout_sec} 秒内挂载，正在重新加载页面重试 [{attempt}/{max_attempts}]...")
+            try:
+                # 若被意外重定向离开了个人中心路由，则重新导航至 /user/index
+                if "user" not in (page.url or "").lower():
+                    page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=30000)
+                else:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(1.5)
+            except Exception as e:
+                print(f"⚠️ 刷新个人中心出错: {short_error(e)}，尝试继续等待")
             
-        time.sleep(1)
-        
     return 'timeout', None
 
 
@@ -1641,23 +1761,17 @@ def run_check_in_for_account(account_name, headless=False):
             
             page = context.new_page()
             
-            # 访问网站
-            print("正在打开个人中心...")
-            try:
-                page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=45000)
-            except Exception as e:
-                print(f"⚠️ 打开个人中心超时: {short_error(e)}，尝试继续")
-            
-            # 检查登录状态
-            if not check_login_status(page):
+            # 严格服务端鉴权验证（直接访问个人中心并校验资产或用户信息）
+            print("正在通过服务端验证账号登录态有效性...")
+            if not verify_account_session(page, timeout_ms=30000):
                 print("❌ 登录状态失效，请重新登录")
                 browser.close()
                 update_account_status(account_name, '签到', success='expired')
                 return False
             
-            # 动态轮询等待签到模块异步数据挂载（最长等待 15 秒）
+            # 动态轮询等待签到模块异步数据挂载（最长支持两次轮询与自动刷新重试）
             print("正在等待个人中心签到状态加载...")
-            status, result = wait_for_sign_in_section(page, timeout_sec=15)
+            status, result = wait_for_sign_in_section(page, timeout_sec=12, max_attempts=2)
 
             if status == 'already_signed':
                 print(f"⏭️ 页面显示账号 '{account_name}' 今日此前已完成签到（{result}），无需重复点击")
@@ -1667,15 +1781,22 @@ def run_check_in_for_account(account_name, headless=False):
                 return True
 
             if status == 'timeout':
-                print("⚠️ 超时未检测到'立即签到'或'已签到'按钮")
+                current_url = page.url
+                page_title = page.title()
+                print(f"⚠️ 超时未检测到'立即签到'或'已签到'按钮 (当前URL: {current_url}, 标题: {page_title})")
+                body_snippet = page.evaluate('''() => {
+                    return (document.body ? document.body.innerText : '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+                }''')
+                if body_snippet:
+                    print(f"🔍 调试诊断：页面文本摘要: {body_snippet}")
                 debug_info = page.evaluate('''() => {
                     const list = [];
                     document.querySelectorAll('*').forEach(el => {
-                        if (el.children.length === 0 && el.innerText && el.innerText.includes('签到') && el.offsetWidth > 0) {
+                        if (el.children.length === 0 && (el.textContent || '').includes('签到') && el.offsetWidth > 0) {
                             list.push({
                                 tag: el.tagName,
                                 class: el.className ? String(el.className) : '',
-                                text: el.innerText.replace(/\\s+/g, ' ').trim().substring(0, 30)
+                                text: (el.textContent || '').replace(/\\s+/g, ' ').trim().substring(0, 30)
                             });
                         }
                     });
@@ -1822,53 +1943,35 @@ def run_share_video_for_account(account_name, headless=False):
                     browser.close()
                     return False
 
-                # 此时在个人中心，获取分享前金币数量
-                coins_before = get_current_coins(page)
-                if coins_before is not None:
-                    print(f"💰 分享前金币数量: {coins_before}")
-                
                 print(f"✅ 账号 '{account_name}' 服务端鉴权有效，开始执行分享视频...")
-                # 执行分享操作
+                # 执行分享操作（以成功捕获目标平台新标签页为铁证）
                 success = share_video(page)
-                coins_after = None
                 if success:
-                    # 重新核验个人中心资产与任务状态变动
+                    # 重新打开个人中心获取最新金币与复核分享任务状态
+                    final_coins = None
                     try:
                         page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=25000)
                         time.sleep(2)
                         
-                        # 检查个人中心分享任务按钮状态（如'待完成' / '已完成'）
-                        task_items = page.evaluate('''() => {
-                            const res = [];
-                            document.querySelectorAll('*').forEach(el => {
-                                if (el.children.length === 0 && el.innerText && el.offsetWidth > 0) {
-                                    const t = el.innerText.trim();
-                                    if (t === '待完成' || t === '已完成' || t === '去完成' || (t.includes('分享') && t.length < 20)) {
-                                        res.push(t);
-                                    }
-                                }
-                            });
-                            return res;
-                        }''')
-                        if task_items:
-                            print(f"📋 个人中心任务状态项: {task_items}")
+                        # 结构化精准定位“每日任务”中“分享视频给好友”卡片专属状态（最多轮询等待 5 秒）
+                        task_status = get_share_task_status(page, timeout_sec=5)
+                        if task_status:
+                            print(f"📋 分享任务状态: {task_status}")
+                        else:
+                            print("ℹ️ 未能从个人中心读取到'分享视频'任务状态")
 
-                        coins_after = get_current_coins(page)
-                        if coins_before is not None and coins_after is not None:
-                            if coins_after > coins_before:
-                                print(f"✅ 金币资产已真实增加：{coins_before} ➡️ {coins_after}（服务端入账铁证）")
-                            elif coins_after == coins_before:
-                                print(f"ℹ️ 个人中心当前金币数量: {coins_after}")
+                        final_coins = get_current_coins(page)
+                        if final_coins is not None:
+                            print(f"💰 账号 '{account_name}' 当前金币: {final_coins}")
                     except Exception as e:
                         print(f"⚠️ 复核分享后个人中心跳过: {short_error(e)}")
 
                     print(f"✅ 账号 '{account_name}' 分享视频成功")
-                    final_coins = coins_after if coins_after is not None else coins_before
                     # 记录分享成功状态与最新金币数
                     update_account_status(account_name, "分享", success=True, coins=final_coins)
                 else:
                     print(f"❌ 账号 '{account_name}' 分享视频失败")
-                    update_account_status(account_name, "分享", success=False, coins=coins_before)
+                    update_account_status(account_name, "分享", success=False)
                 
                 browser.close()
                 return success
@@ -2675,7 +2778,7 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mod
 
             if manual_save:
                 input("\n✅ 登录成功后，请按回车键保存登录状态...")
-                is_logged_in = check_login_status(page)
+                is_logged_in = check_login_status(page, verbose=True)
             else:
                 is_logged_in = wait_for_login_success(page, login_frame=login_frame, timeout_seconds=timeout_seconds)
             
