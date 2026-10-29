@@ -46,11 +46,11 @@ python main.py add <邮箱> <密码>
 
 #### 1. 登录单个账号：
 ```bash
-python main.py login <账号名>
+python main.py login 账号名
 ```
 *如需延长等待时间，可添加 `--timeout 秒数`（默认 180 秒）：*
 ```bash
-python main.py login <账号名> --timeout 300
+python main.py login 账号名 --timeout 300
 ```
 
 #### 2. 连续批量登录后续所有账号（`auto` 参数）：
@@ -73,7 +73,7 @@ python main.py login auto
 
 ### 删除账号
 ```bash
-python main.py delete <账号名>
+python main.py delete 账号名
 ```
 
 ### 列出所有账号
@@ -86,33 +86,33 @@ python main.py list
 如果某账号需要从批量操作中排除，可以加入忽略名单；在取消忽略前，`run`、`checkin`、`share`、`coins` 批量操作都会跳过该账号：
 
 ```bash
-python main.py ignore <账号名>
-python main.py unignore <账号名>
+python main.py ignore 账号名
+python main.py unignore 账号名
 python main.py ignored
 ```
 
 ### 为所有账号执行签到和分享
 
 ```bash
-python main.py run [--visible]
+python main.py run --visible
 ```
 
 ### 仅签到
 
 ```bash
-python main.py checkin [--visible]
+python main.py checkin --visible
 ```
 
 ### 仅分享
 
 ```bash
-python main.py share [--visible]
+python main.py share --visible
 ```
 
 ### 获取所有账号金币统计
 
 ```bash
-python main.py coins [--visible]
+python main.py coins --visible
 ```
 
 ---

@@ -202,11 +202,11 @@ def check_login_status(page, verbose=False):
                 print(f"✅ 检测到登录用户名: {username}")
             return True
 
-        # 3. 检查是否有明确的退出登录入口（只有已登录才会出现）
-        logout_btn = page.locator('a:has-text("退出"), button:has-text("退出"), [href*="logout"]').first
-        if logout_btn and logout_btn.count() > 0 and logout_btn.is_visible():
+        # 3. 检查是否有明确的登出/退出登录入口（只有已登录才会出现，如悬停弹窗里的“登出”）
+        logout_btn = page.locator('a:has-text("登出"), button:has-text("登出"), a:has-text("退出"), button:has-text("退出"), [href*="logout"]').first
+        if logout_btn and logout_btn.count() > 0:
             if verbose:
-                print("✅ 检测到退出登录按钮，确认已登录")
+                print("✅ 检测到登出/退出登录入口，确认已登录")
             return True
 
         # 4. 检查客户端是否已持有爱壹帆权威的服务端会话 Cookie (dn_token)
@@ -233,12 +233,17 @@ def check_login_status(page, verbose=False):
         return False
 
 
-def verify_account_session(page, timeout_ms=25000):
+def verify_account_session(page, timeout_ms=30000, max_wait_sec=8):
     """
     基于服务端鉴权事实严格检验当前会话（Session/Cookie）是否有效。
-    原理：
-    服务端对有效会话会正常渲染 /user/index 并返回金币/资料等用户数据；
-    若 Session 失效，服务端会重定向到首页 / 或不返回任何个人中心资产。
+    针对 Vue 单页应用 (SPA) 异步渲染特性的双重防御设计：
+    1. SPA 异步注水容错（杜绝瞬时骨架误判）：
+       在页面初次渲染时，未登录占位骨架文案（如“您需要登录才能访问这个页面”）可能会短暂瞬时出现，
+       直到后台 /api 接口返回用户数据后才由 Vue 替换为真实资产。
+       因此绝不在看到该文案的第 1 秒就盲目判死，而是采用动态轮询等待：只要检测到真实金币或用户信息，立即判定有效放行！
+    2. 超时坚决兜底：
+       若在最长等待时间内（结合自动刷新重试）始终无法渲染出任何金币或用户资料，且持续呈现拦截文案，
+       才确凿判定该账号在服务端已失效。
     返回: True (服务端鉴权有效) / False (已失效或未登录)
     """
     try:
@@ -247,34 +252,73 @@ def verify_account_session(page, timeout_ms=25000):
         except Exception as e:
             print(f"⚠️ 导航到个人中心超时: {short_error(e)}，尝试继续检查页面")
 
-        time.sleep(2.5)
+        for attempt in range(1, 3):
+            # 若意外被路由重定向弹回首页，主动重新导航回 /user/index
+            if "user" not in (page.url or "").lower():
+                time.sleep(1.5)
+                try:
+                    page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                if "user" not in (page.url or "").lower():
+                    if attempt == 2:
+                        return False
 
-        # 1. 检查是否重定向离开了个人中心（若首次打开被弹回首页，给予一次重试重新导航）
-        if "user" not in page.url.lower():
-            time.sleep(1.5)
-            try:
-                page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
-                time.sleep(2.5)
-            except Exception:
-                pass
-            if "user" not in page.url.lower():
-                return False
+            # 动态轮询等待 Vue SPA 完成异步鉴权与资产渲染（默认最多 8 秒）
+            poll_start = time.time()
+            wait_limit = max_wait_sec if attempt == 1 else 6
+            while time.time() - poll_start < wait_limit:
+                status = page.evaluate("""() => {
+                    // 1. 优先正向确凿凭据：检查真实金币资产（必须包含数字）
+                    const coinEl = document.querySelector('div[title="金币"], [class*="coin"]');
+                    if (coinEl && /\\d+/.test(coinEl.textContent || '')) {
+                        return 'valid';
+                    }
 
-        # 2. 检查个人中心核心资产元素或用户资料元素
-        has_assets = page.evaluate("""() => {
-            const coinEl = document.querySelector('div[title="金币"], [class*="coin"]');
-            if (coinEl && coinEl.textContent.trim().length > 0) return true;
+                    // 2. 正向凭据：明确的登出/退出入口（包括右上角用户头像悬停弹出的“登出”或带有 logout 属性的节点）
+                    const logoutEl = Array.from(document.querySelectorAll('a, button, span, div, li')).find(el => {
+                        const href = el.getAttribute ? (el.getAttribute('href') || '') : '';
+                        const t = (el.textContent || '').trim();
+                        return href.includes('logout') || t === '登出' || t === '退出' || t === '退出登录';
+                    });
+                    if (logoutEl) {
+                        return 'valid';
+                    }
 
-            const profileEl = document.querySelector('.user-info, .user-name, .nickname, [class*="profile"]');
-            if (profileEl && profileEl.textContent.trim().length > 0) return true;
+                    // 3. 正向凭据：真实用户昵称（排除登录/注册等占位文案）
+                    const profileEl = document.querySelector('.user-name, .nickname, [class*="username"]');
+                    if (profileEl) {
+                        const t = (profileEl.textContent || '').trim();
+                        if (t && !t.includes('登录') && !t.includes('注册')) {
+                            return 'valid';
+                        }
+                    }
 
-            const logoutEl = document.querySelector('a[href*="logout"], a:has-text("退出")');
-            if (logoutEl) return true;
+                    // 4. 负向凭据：页面呈现未登录拦截提示
+                    const bodyText = (document.body ? document.body.innerText : '') || '';
+                    if (bodyText.includes('您需要登录才能访问这个页面') || bodyText.includes('立即登录')) {
+                        return 'needs_login';
+                    }
 
-            return false;
-        }""")
+                    return 'loading';
+                }""")
 
-        return bool(has_assets)
+                if status == 'valid':
+                    return True
+
+                time.sleep(0.5)
+
+            # 首轮未果，尝试刷新页面给予二次鉴权机会（应对偶发网络丢包或分包加载停滞）
+            if attempt == 1:
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+                    time.sleep(1.5)
+                except Exception:
+                    pass
+
+        # 经历两轮充分等待与刷新后仍未呈现资产，判定为真正失效
+        return False
+
     except Exception as e:
         print(f"⚠️ 会话鉴权校验发生异常: {short_error(e)}")
         return False
@@ -402,14 +446,19 @@ def load_storage_state(context, file_path):
 def logout(page):
     """登出当前账号"""
     try:
-        # 尝试点击头像
+        # 尝试悬浮或点击头像唤起菜单小窗
         avatar = page.locator('.user-avatar, .avatar, .user-profile').first
         if avatar.count() > 0:
+            try:
+                avatar.hover()
+                time.sleep(0.5)
+            except Exception:
+                pass
             avatar.click()
             time.sleep(1)
             
-            # 尝试点击登出按钮
-            logout_btn = page.locator('a:has-text("退出"), a:has-text("登出"), button:has-text("退出")').first
+            # 尝试点击登出按钮（支持悬停小窗中的“登出”或“退出”）
+            logout_btn = page.locator('a:has-text("登出"), button:has-text("登出"), a:has-text("退出"), button:has-text("退出")').first
             if logout_btn.count() > 0:
                 logout_btn.click()
                 time.sleep(2)
@@ -1329,7 +1378,8 @@ def share_video(page):
                     tab_url = opened_tab.url
                 except Exception:
                     pass
-                print(f"✅ 成功打开目标平台标签页: {tab_url or cand['displayName']}（服务端任务判定达成）")
+                target = '/'.join(tab_url.split('/')[:3]) if tab_url else cand['displayName']
+                print(f"✅ 成功打开目标平台标签页: {target}（服务端任务判定达成）")
                 try:
                     time.sleep(1)
                     opened_tab.close()
@@ -1956,7 +2006,7 @@ def run_share_video_for_account(account_name, headless=False):
                         # 结构化精准定位“每日任务”中“分享视频给好友”卡片专属状态（最多轮询等待 5 秒）
                         task_status = get_share_task_status(page, timeout_sec=5)
                         if task_status:
-                            print(f"📋 分享任务状态: {task_status}")
+                            print(f"✅ 个人中心主界面分享任务已呈现'{task_status}'状态（判定分享成功）")
                         else:
                             print("ℹ️ 未能从个人中心读取到'分享视频'任务状态")
 
