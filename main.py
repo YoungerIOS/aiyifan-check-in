@@ -147,6 +147,112 @@ def load_email_config():
 load_email_config()
 
 
+# ============================================================
+# 爱壹帆多镜像域名自动探活与故障转移机制
+# ============================================================
+CANDIDATE_DOMAINS = ["yifan.tv", "iyf.tv", "yfsp.tv"]
+_ACTIVE_DOMAIN = None
+
+
+def probe_domain_health(domain, timeout=4):
+    """
+    轻量快速探测指定域名是否健康可用：
+    1. 能成功解析并建立 HTTPS 连接；
+    2. HTTP 状态码为正常 200~399，排除 403 质询盾、5xx 或连接被重置。
+    """
+    try:
+        import urllib.request
+        url = f"https://www.{domain}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+        )
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            if 200 <= resp.status < 400:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def get_active_domain(force_refresh=False):
+    """
+    获取当前活跃可用的主域名：
+    依次探测 CANDIDATE_DOMAINS，找到首个响应正常的域名；
+    若所有域名探测均异常，回退至首个默认域名。
+    """
+    global _ACTIVE_DOMAIN
+    if _ACTIVE_DOMAIN and not force_refresh:
+        return _ACTIVE_DOMAIN
+
+    print("🔍 正在探测爱壹帆可用镜像域名...")
+    for dom in CANDIDATE_DOMAINS:
+        if probe_domain_health(dom, timeout=3.5):
+            _ACTIVE_DOMAIN = dom
+            print(f"✅ 自动锁定可用镜像域名: {_ACTIVE_DOMAIN} (https://www.{_ACTIVE_DOMAIN})")
+            return _ACTIVE_DOMAIN
+
+    _ACTIVE_DOMAIN = CANDIDATE_DOMAINS[0]
+    print(f"⚠️ 所有镜像域名探测均异常，回退使用默认域名: {_ACTIVE_DOMAIN}")
+    return _ACTIVE_DOMAIN
+
+
+def mark_domain_failed(failed_domain):
+    """
+    当运行时某个域名发生致命网络错误（如连接被掐断），
+    将该域名从优选排除并触发自动切换到下一个可用域名。
+    """
+    global _ACTIVE_DOMAIN
+    print(f"⚠️ 监测到域名 '{failed_domain}' 访问异常，正在寻找备用可用域名...")
+    for dom in CANDIDATE_DOMAINS:
+        if dom != failed_domain and probe_domain_health(dom, timeout=3.5):
+            _ACTIVE_DOMAIN = dom
+            print(f"🔄 已自动故障转移至备用域名: {_ACTIVE_DOMAIN} (https://www.{_ACTIVE_DOMAIN})")
+            return _ACTIVE_DOMAIN
+
+    for dom in CANDIDATE_DOMAINS:
+        if dom != failed_domain:
+            _ACTIVE_DOMAIN = dom
+            print(f"🔄 切换至下一个备用域名: {_ACTIVE_DOMAIN}")
+            return _ACTIVE_DOMAIN
+    return _ACTIVE_DOMAIN
+
+
+def get_base_url():
+    """获取当前主站基础 URL，例如 https://www.yifan.tv"""
+    return f"https://www.{get_active_domain()}"
+
+
+def launch_browser(p, headless=True, extra_args=None):
+    """
+    通用浏览器启动函数：
+    优先尝试启动本地系统 Chrome（具备原生真实指纹与反反爬参数），
+    若系统未安装 Chrome 则平滑回退至 Playwright 自带 Chromium。
+    """
+    args = [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+    ]
+    if extra_args:
+        args.extend(extra_args)
+
+    try:
+        return p.chromium.launch(
+            headless=headless,
+            channel="chrome",
+            args=args,
+        )
+    except Exception:
+        return p.chromium.launch(
+            headless=headless,
+            args=args,
+        )
+
+
 def _load_yfsp_login_entry_css():
     """可选：account_data/yfsp_ui_config.json 中的 login_entry_css，站点改版时可强制指定登录入口。"""
     path = os.path.join(BASE_DIR, "account_data", "yfsp_ui_config.json")
@@ -247,17 +353,27 @@ def verify_account_session(page, timeout_ms=30000, max_wait_sec=8):
     返回: True (服务端鉴权有效) / False (已失效或未登录)
     """
     try:
+        user_index_url = f"{get_base_url()}/user/index"
         try:
-            page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
+            page.goto(user_index_url, timeout=timeout_ms, wait_until="domcontentloaded")
         except Exception as e:
-            print(f"⚠️ 导航到个人中心超时: {short_error(e)}，尝试继续检查页面")
+            err_msg = str(e)
+            print(f"⚠️ 导航到个人中心异常: {short_error(e)}")
+            # 若因当前域名失效导致连接失败，自动触发故障转移重试一次
+            if "ERR_CONNECTION" in err_msg or "ERR_NAME" in err_msg:
+                mark_domain_failed(get_active_domain())
+                user_index_url = f"{get_base_url()}/user/index"
+                try:
+                    page.goto(user_index_url, timeout=timeout_ms, wait_until="domcontentloaded")
+                except Exception:
+                    pass
 
         for attempt in range(1, 3):
             # 若意外被路由重定向弹回首页，主动重新导航回 /user/index
             if "user" not in (page.url or "").lower():
                 time.sleep(1.5)
                 try:
-                    page.goto("https://www.yfsp.tv/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
+                    page.goto(f"{get_base_url()}/user/index", timeout=timeout_ms, wait_until="domcontentloaded")
                 except Exception:
                     pass
                 if "user" not in (page.url or "").lower():
@@ -384,52 +500,68 @@ def save_storage_state(context, file_path):
     print(f"✅ 已保存浏览器状态到 {file_path}")
 
 def load_storage_state(context, file_path):
-    """加载保存的浏览器状态，包括cookies和localStorage"""
+    """加载保存的浏览器状态，包括cookies和localStorage，支持爱壹帆多镜像域名跨域平滑迁移"""
     try:
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
                 storage = json.load(f)
             
-            # 加载cookies
+            active_dom = get_active_domain()
+            
+            # 加载cookies，并将历史域名（如 yfsp.tv）动态重写映射为当前活跃域名（如 yifan.tv）
             if 'cookies' in storage:
-                context.add_cookies(storage['cookies'])
-                print(f"✅ 成功加载 {len(storage['cookies'])} 个cookies")
+                adapted_cookies = []
+                for cookie in storage['cookies']:
+                    c = dict(cookie)
+                    c_domain = c.get('domain', '')
+                    # 将已知的所有候选域名替换为当前活跃主域名
+                    for known in CANDIDATE_DOMAINS:
+                        if known in c_domain:
+                            c['domain'] = c_domain.replace(known, active_dom)
+                            break
+                    if 'partitionKey' in c and isinstance(c['partitionKey'], str):
+                        for known in CANDIDATE_DOMAINS:
+                            if known in c['partitionKey']:
+                                c['partitionKey'] = c['partitionKey'].replace(known, active_dom)
+                                break
+                    adapted_cookies.append(c)
+                
+                context.add_cookies(adapted_cookies)
+                # print(f"✅ 成功加载并映射 {len(adapted_cookies)} 个 cookies 至当前域名 ({active_dom})")
             
             # 加载localStorage
             if 'origins' in storage:
-                # 创建一个临时页面并导航到目标网站
                 page = context.new_page()
                 try:
-                    # 先导航到目标网站以获取正确的源
+                    # 先导航到当前活跃站点以获取正确的源，设置宽容异常捕获
+                    base_url = get_base_url()
                     try:
-                        page.goto("https://www.yfsp.tv", wait_until="domcontentloaded", timeout=45000)
-                    except PlaywrightTimeoutError as e:
-                        print(f"⚠️ 恢复 localStorage 时打开首页超时，继续使用已加载 cookies: {short_error(e)}")
+                        page.goto(base_url, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as e:
+                        pass
                     
                     # 处理origins是列表的情况
                     if isinstance(storage['origins'], list):
                         for origin_data in storage['origins']:
                             if 'origin' in origin_data and 'localStorage' in origin_data:
                                 try:
-                                    # 设置localStorage
                                     for item in origin_data['localStorage']:
                                         if 'name' in item and 'value' in item:
-                                            page.evaluate(f"localStorage.setItem('{item['name']}', '{item['value']}')")
-                                    print(f"✅ 成功设置 {len(origin_data['localStorage'])} 个localStorage项")
+                                            key = json.dumps(item['name'])
+                                            val = json.dumps(item['value'])
+                                            page.evaluate(f"localStorage.setItem({key}, {val})")
                                 except Exception:
-                                    # 静默处理localStorage访问错误
                                     pass
                     # 处理origins是字典的情况
                     else:
                         for origin, storage_data in storage['origins'].items():
                             if 'localStorage' in storage_data:
                                 try:
-                                    # 设置localStorage
                                     for key, value in storage_data['localStorage'].items():
-                                        page.evaluate(f"localStorage.setItem('{key}', '{value}')")
-                                    print(f"✅ 成功设置 {len(storage_data['localStorage'])} 个localStorage项")
+                                        k = json.dumps(key)
+                                        v = json.dumps(value)
+                                        page.evaluate(f"localStorage.setItem({k}, {v})")
                                 except Exception:
-                                    # 静默处理localStorage访问错误
                                     pass
                 finally:
                     page.close()
@@ -755,7 +887,7 @@ def wait_for_sign_in_section(page, timeout_sec=12, max_attempts=2):
             try:
                 # 若被意外重定向离开了个人中心路由，则重新导航至 /user/index
                 if "user" not in (page.url or "").lower():
-                    page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=30000)
+                    page.goto(f"{get_base_url()}/user/index", wait_until="domcontentloaded", timeout=30000)
                 else:
                     page.reload(wait_until="domcontentloaded", timeout=30000)
                 time.sleep(1.5)
@@ -929,7 +1061,7 @@ def share_video(page):
 
         # 导航到动漫列表页面，而不是首页
         print("正在导航到动漫列表页面...")
-        page.goto("https://www.yfsp.tv/list/anime?orderBy=1", timeout=45000, wait_until="domcontentloaded")
+        page.goto(f"{get_base_url()}/list/anime?orderBy=1", timeout=45000, wait_until="domcontentloaded")
         time.sleep(3)
         
         # 确保页面完全加载
@@ -1002,7 +1134,7 @@ def share_video(page):
                     
                     # 直接导航到视频页面，而不是点击
                     video_href = selected_link.get('href')
-                    video_url = "https://www.yfsp.tv" + video_href if video_href.startswith("/") else video_href
+                    video_url = get_base_url() + video_href if video_href.startswith("/") else video_href
                     # print(f"直接导航到视频页面: {video_url}")
                     try:
                         page.goto(video_url, timeout=30000, wait_until="domcontentloaded")
@@ -1043,7 +1175,7 @@ def share_video(page):
             try:
                 href = selected_video.get_attribute("href")
                 if href:
-                    full_url = "https://www.yfsp.tv" + href if href.startswith("/") else href
+                    full_url = get_base_url() + href if href.startswith("/") else href
                     # print(f"直接导航到视频页面: {full_url}")
                     try:
                         page.goto(full_url, timeout=30000, wait_until="domcontentloaded")
@@ -1793,7 +1925,7 @@ def run_check_in_for_account(account_name, headless=False):
     with sync_playwright() as p:
         try:
             # 启动浏览器，设定标准桌面视口避免无头模式下页面折叠
-            browser = p.chromium.launch(headless=headless)
+            browser = launch_browser(p, headless=headless)
             context = browser.new_context(viewport={"width": 1920, "height": 1080})
             
             # 加载保存的状态
@@ -1965,7 +2097,7 @@ def run_share_video_for_account(account_name, headless=False):
         with sync_playwright() as p:
             try:
                 # 启动浏览器，统一配置 1080P 标准视口并授予剪贴板读写权限
-                browser = p.chromium.launch(headless=use_headless)
+                browser = launch_browser(p, headless=use_headless)
                 context = browser.new_context(
                     viewport={"width": 1920, "height": 1080},
                     permissions=["clipboard-read", "clipboard-write"]
@@ -2000,7 +2132,7 @@ def run_share_video_for_account(account_name, headless=False):
                     # 重新打开个人中心获取最新金币与复核分享任务状态
                     final_coins = None
                     try:
-                        page.goto("https://www.yfsp.tv/user/index", wait_until="domcontentloaded", timeout=25000)
+                        page.goto(f"{get_base_url()}/user/index", wait_until="domcontentloaded", timeout=25000)
                         time.sleep(2)
                         
                         # 结构化精准定位“每日任务”中“分享视频给好友”卡片专属状态（最多轮询等待 5 秒）
@@ -2366,8 +2498,10 @@ def _yfsp_wait_login_iframe(page, total_timeout_ms=25000):
     return None
 
 
-def open_yfsp_login_iframe_and_fill(page, email, password, start_url="https://www.yfsp.tv/list/anime"):
+def open_yfsp_login_iframe_and_fill(page, email, password, start_url=None):
     """打开站点登录框、切换到「其他方式登录」、填写邮箱与密码。不执行滑动验证、不点击提交。"""
+    if not start_url:
+        start_url = f"{get_base_url()}/list/anime"
     page.goto(start_url, timeout=60000, wait_until="domcontentloaded")
     try:
         page.wait_for_load_state("load", timeout=25000)
@@ -2710,25 +2844,11 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mod
             # 使用系统 Chrome 浏览器（而非 Playwright 自带的 Chromium）
             # 这样可以避免被网站检测为自动化工具
             try:
-                browser = p.chromium.launch(
-                    headless=False,
-                    channel="chrome",  # 使用系统 Chrome
-                    args=[
-                        '--disable-blink-features=AutomationControlled',
-                    ]
-                )
-                print("✅ 已启动系统 Chrome 浏览器")
-            except Exception as chrome_error:
-                print(f"⚠️ 无法启动系统 Chrome: {str(chrome_error)}")
-                print("   正在尝试使用 Chromium...")
-                browser = p.chromium.launch(
-                    headless=False,
-                    args=[
-                        '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox',
-                        '--disable-dev-shm-usage'
-                    ]
-                )
+                browser = launch_browser(p, headless=False)
+                print("✅ 已启动浏览器")
+            except Exception as e:
+                print(f"❌ 启动浏览器失败: {str(e)}")
+                return False
             
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
@@ -2753,9 +2873,9 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mod
                     print("✅ 已在登录弹窗中填写邮箱与密码")
                 except Exception as e:
                     print(f"⚠️ 自动打开登录或填写失败: {e}")
-                    print("   请你在浏览器中自行完成：打开 https://www.yfsp.tv 并点击「登录」…")
+                    print(f"   请你在浏览器中自行完成：打开 {get_base_url()} 并点击「登录」…")
                     try:
-                        page.goto("https://www.yfsp.tv", timeout=60000, wait_until="commit")
+                        page.goto(get_base_url(), timeout=60000, wait_until="commit")
                         page.wait_for_load_state("domcontentloaded", timeout=15000)
                     except Exception:
                         pass
@@ -2763,7 +2883,7 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mod
                 print("正在打开页面并尝试自动点击顶栏「登录」…")
                 try:
                     page.goto(
-                        "https://www.yfsp.tv/list/anime",
+                        f"{get_base_url()}/list/anime",
                         timeout=60000,
                         wait_until="domcontentloaded",
                     )
@@ -2772,7 +2892,7 @@ def manual_login(account_name, timeout_seconds=180, manual_save=False, batch_mod
                     print(f"⚠️ 打开 list/anime 失败: {nav_error}，改试首页…")
                     try:
                         page.goto(
-                            "https://www.yfsp.tv",
+                            get_base_url(),
                             timeout=60000,
                             wait_until="domcontentloaded",
                         )
@@ -3181,6 +3301,8 @@ def auto_operations(operation_type='all', headless=True):
         print("❌ 所有账号都在忽略名单中，没有可执行的账号")
         return False
     
+    # 批量开始前主动探测并锁定当前最优镜像域名
+    get_active_domain()
     print(f"\n➡️ 开始为 {len(active_accounts)} 个账号执行操作: {operation_type}")
     
     success_count = 0
@@ -3293,9 +3415,8 @@ def get_account_coins(account_name, headless=True):
     
     try:
         with sync_playwright() as p:
-            browser_type = p.chromium
             try:
-                browser = browser_type.launch(headless=headless, args=browser_args)
+                browser = launch_browser(p, headless=headless, extra_args=browser_args)
                 print("✅ 已启动浏览器")
             except Exception as e:
                 print(f"❌ 启动浏览器失败: {str(e)}")
@@ -3325,7 +3446,7 @@ def get_account_coins(account_name, headless=True):
                 # 导航到个人中心页面
                 print("正在导航到个人中心页面...")
                 try:
-                    page.goto("https://www.yfsp.tv/user/index", timeout=30000, wait_until="domcontentloaded")
+                    page.goto(f"{get_base_url()}/user/index", timeout=30000, wait_until="domcontentloaded")
                 except Exception as e:
                     print(f"⚠️ 导航到个人中心页面超时: {short_error(e)}，尝试继续获取金币")
                 
