@@ -397,6 +397,7 @@ def verify_account_session(page, timeout_ms=30000, max_wait_sec=8):
             # 动态轮询等待 Vue SPA 完成异步鉴权与资产渲染（默认最多 8 秒）
             poll_start = time.time()
             wait_limit = max_wait_sec if attempt == 1 else 6
+            sso_clicked = False
             while time.time() - poll_start < wait_limit:
                 status = page.evaluate("""() => {
                     // 1. 优先正向确凿凭据：检查真实金币资产（必须包含数字）
@@ -435,6 +436,17 @@ def verify_account_session(page, timeout_ms=30000, max_wait_sec=8):
 
                 if status == 'valid':
                     return True
+
+                if status == 'needs_login' and not sso_clicked:
+                    # 检测到页面提示未登录，尝试点击「立即登录」唤起 SSO 弹层触发静默换签（已持有 .anybound.vip 会话凭证）
+                    try:
+                        login_btn = page.locator('button:has-text("立即登录"), a:has-text("立即登录"), .login-btn, button:has-text("登录"), a:has-text("登录")').first
+                        if login_btn.count() > 0 and login_btn.is_visible():
+                            login_btn.click(timeout=3000)
+                            sso_clicked = True
+                            time.sleep(2.5)
+                    except Exception:
+                        pass
 
                 time.sleep(0.5)
 
