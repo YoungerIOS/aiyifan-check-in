@@ -148,9 +148,9 @@ load_email_config()
 
 
 # ============================================================
-# 爱壹帆多镜像域名自动探活与故障转移机制
+# 爱壹帆/酷播多镜像域名自动探活与故障转移机制
 # ============================================================
-CANDIDATE_DOMAINS = ["yifan.tv", "iyf.tv", "yfsp.tv"]
+CANDIDATE_DOMAINS = ["kubb.tv", "yifan.tv", "iyf.tv", "yfsp.tv"]
 _ACTIVE_DOMAIN = None
 
 
@@ -158,10 +158,13 @@ def probe_domain_health(domain, timeout=4):
     """
     轻量快速探测指定域名是否健康可用：
     1. 能成功解析并建立 HTTPS 连接；
-    2. HTTP 状态码为正常 200~399，排除 403 质询盾、5xx 或连接被重置。
+    2. HTTP 状态码为正常 200~399，排除 403 质询盾、5xx 或连接被重置；
+    3. 支持自适应跨域重定向追踪（如 yifan.tv 301 永久重定向至 kubb.tv 时，自动捕获目标新域名）。
+    返回: (True, target_domain) 或 (False, None)
     """
     try:
         import urllib.request
+        from urllib.parse import urlparse
         url = f"https://www.{domain}"
         req = urllib.request.Request(
             url,
@@ -172,26 +175,35 @@ def probe_domain_health(domain, timeout=4):
         ctx = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             if 200 <= resp.status < 400:
-                return True
+                final_url = resp.geturl()
+                p = urlparse(final_url)
+                if p.netloc:
+                    resolved_domain = p.netloc.replace("www.", "").split(":")[0]
+                    return True, resolved_domain
+                return True, domain
     except Exception:
         pass
-    return False
+    return False, None
 
 
 def get_active_domain(force_refresh=False):
     """
     获取当前活跃可用的主域名：
     依次探测 CANDIDATE_DOMAINS，找到首个响应正常的域名；
+    支持重定向跟随发现全新品牌域名；
     若所有域名探测均异常，回退至首个默认域名。
     """
     global _ACTIVE_DOMAIN
     if _ACTIVE_DOMAIN and not force_refresh:
         return _ACTIVE_DOMAIN
 
-    print("🔍 正在探测爱壹帆可用镜像域名...")
+    print("🔍 正在探测爱壹帆/酷播可用镜像域名...")
     for dom in CANDIDATE_DOMAINS:
-        if probe_domain_health(dom, timeout=3.5):
-            _ACTIVE_DOMAIN = dom
+        ok, resolved_dom = probe_domain_health(dom, timeout=3.5)
+        if ok and resolved_dom:
+            _ACTIVE_DOMAIN = resolved_dom
+            if _ACTIVE_DOMAIN != dom:
+                print(f"🔄 检测到域名 '{dom}' 重定向至新站点: {_ACTIVE_DOMAIN}")
             print(f"✅ 自动锁定可用镜像域名: {_ACTIVE_DOMAIN} (https://www.{_ACTIVE_DOMAIN})")
             return _ACTIVE_DOMAIN
 
@@ -208,10 +220,12 @@ def mark_domain_failed(failed_domain):
     global _ACTIVE_DOMAIN
     print(f"⚠️ 监测到域名 '{failed_domain}' 访问异常，正在寻找备用可用域名...")
     for dom in CANDIDATE_DOMAINS:
-        if dom != failed_domain and probe_domain_health(dom, timeout=3.5):
-            _ACTIVE_DOMAIN = dom
-            print(f"🔄 已自动故障转移至备用域名: {_ACTIVE_DOMAIN} (https://www.{_ACTIVE_DOMAIN})")
-            return _ACTIVE_DOMAIN
+        if dom != failed_domain:
+            ok, resolved_dom = probe_domain_health(dom, timeout=3.5)
+            if ok and resolved_dom and resolved_dom != failed_domain:
+                _ACTIVE_DOMAIN = resolved_dom
+                print(f"🔄 已自动故障转移至备用域名: {_ACTIVE_DOMAIN} (https://www.{_ACTIVE_DOMAIN})")
+                return _ACTIVE_DOMAIN
 
     for dom in CANDIDATE_DOMAINS:
         if dom != failed_domain:
@@ -432,7 +446,27 @@ def verify_account_session(page, timeout_ms=30000, max_wait_sec=8):
                 except Exception:
                     pass
 
-        # 经历两轮充分等待与刷新后仍未呈现资产，判定为真正失效
+        # 经历两轮充分等待与刷新后仍未呈现资产，提取失败原因以供精准诊断输出
+        cur_url = page.url or ""
+        diag_reason = page.evaluate("""() => {
+            const body = document.body ? document.body.innerText : '';
+            if (body.includes('Just a moment') || body.includes('Checking if the site connection is secure') || !!document.querySelector('#challenge-running, #challenge-form')) {
+                return 'cloudflare_shield';
+            }
+            if (body.includes('您需要登录才能访问这个页面') || body.includes('立即登录')) {
+                return 'token_expired';
+            }
+            return 'assets_not_rendered';
+        }""")
+        if "user" not in cur_url.lower():
+            print(f"⚠️ 无法进入个人中心（当前停留在非用户页面: {cur_url}）")
+        elif diag_reason == 'cloudflare_shield':
+            print("⚠️ 检测到 Cloudflare 人机质询盾拦截，个人中心未放行")
+        elif diag_reason == 'token_expired':
+            print("ℹ️ 页面明确提示需登录，确认服务端登录凭据已过期")
+        else:
+            print(f"⚠️ 个人中心资产未渲染或网络响应迟缓 (当前URL: {cur_url})")
+
         return False
 
     except Exception as e:
@@ -519,11 +553,9 @@ def load_storage_state(context, file_path):
                         if known in c_domain:
                             c['domain'] = c_domain.replace(known, active_dom)
                             break
-                    if 'partitionKey' in c and isinstance(c['partitionKey'], str):
-                        for known in CANDIDATE_DOMAINS:
-                            if known in c['partitionKey']:
-                                c['partitionKey'] = c['partitionKey'].replace(known, active_dom)
-                                break
+                    # 移除 partitionKey，避免 CHIPS 隔离导致 Cookie 在新域名下被 Chromium 屏蔽
+                    if 'partitionKey' in c:
+                        del c['partitionKey']
                     adapted_cookies.append(c)
                 
                 context.add_cookies(adapted_cookies)
