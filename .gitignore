@@ -1,6 +1,5 @@
 account_data/
-logs/*
-!logs/.gitkeep
+logs/
 *.log
 .DS_Store
 __pycache__/
