@@ -58,7 +58,18 @@ def play_prompt_sound(sound_name="Glass"):
 # 项目路径与全局日志配置（标准 logging 体系）
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
-LOG_PATH = os.path.join(BASE_DIR, "aiyifan.log")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+
+
+def get_today_log_path(date_str=None):
+    """获取指定日期（默认今日）的运行日志文件路径（logs/aiyifan_YYYY-MM-DD.log）"""
+    if not date_str:
+        date_str = datetime.now().strftime('%Y-%m-%d')
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    return os.path.join(LOGS_DIR, f"aiyifan_{date_str}.log")
+
+
+LOG_PATH = get_today_log_path()
 
 _builtin_print = builtins.print
 
@@ -67,7 +78,7 @@ def print(*args, **kwargs):
     """
     标准工程规范桥接：
     将业务代码中的 print 统一接入 Python 标准 logging 体系，
-    同时输出到终端控制台与 aiyifan.log，无需侵入式重构既有代码。
+    同时输出到终端控制台与当前日期的运行日志文件，无需侵入式重构既有代码。
     """
     if 'file' in kwargs and kwargs['file'] is not None and kwargs['file'] not in (sys.stdout, sys.stderr):
         _builtin_print(*args, **kwargs)
@@ -77,13 +88,77 @@ def print(*args, **kwargs):
     logging.info(msg)
 
 
+def cleanup_app_logs(max_keep=7):
+    """限制 logs 目录下的运行日志数量，最多保留最新的 max_keep 份（默认 7 份）。"""
+    if not os.path.exists(LOGS_DIR):
+        return
+
+    try:
+        files = [
+            f for f in os.listdir(LOGS_DIR)
+            if f.startswith('aiyifan_') and f.endswith('.log') and os.path.isfile(os.path.join(LOGS_DIR, f))
+        ]
+        files.sort()  # aiyifan_YYYY-MM-DD.log 升序排序
+        if len(files) > max_keep:
+            to_remove = files[:-max_keep]
+            for fname in to_remove:
+                fpath = os.path.join(LOGS_DIR, fname)
+                try:
+                    os.remove(fpath)
+                except Exception as err:
+                    logging.warning(f"删除历史运行日志文件失败 {fpath}: {err}")
+    except Exception as e:
+        logging.warning(f"清理运行日志失败: {e}")
+
+
+def cleanup_status_logs(max_keep=7):
+    """限制 logs 目录下的状态流水文件数量，最多保留最新的 max_keep 份（默认 7 份）。"""
+    if not os.path.exists(LOGS_DIR):
+        return
+
+    try:
+        files = [
+            f for f in os.listdir(LOGS_DIR)
+            if f.endswith('_status.txt') and os.path.isfile(os.path.join(LOGS_DIR, f))
+        ]
+        files.sort()  # YYYY-MM-DD_status.txt 按字母升序即按日期先后排序
+        if len(files) > max_keep:
+            to_remove = files[:-max_keep]
+            for fname in to_remove:
+                fpath = os.path.join(LOGS_DIR, fname)
+                try:
+                    os.remove(fpath)
+                except Exception as err:
+                    logging.warning(f"删除历史状态日志文件失败 {fpath}: {err}")
+    except Exception as e:
+        logging.warning(f"清理状态日志失败: {e}")
+
+
+def cleanup_logs(max_keep=7):
+    """统一清理 logs 目录下的运行日志与打卡状态流水，各自最多保留最新的 max_keep 份（默认 7 份）。"""
+    cleanup_status_logs(max_keep)
+    cleanup_app_logs(max_keep)
+
+
+# 保持向后兼容别名
+cleanup_shared_logs = cleanup_logs
+
+
 def init_logging():
     """
     采用业内标准工程规范配置根 logger：
-    - FileHandler(mode='w')：每次启动覆盖上一份日志，仅保留最新一次完整记录；
+    - 按自然日创建并写入 logs/aiyifan_YYYY-MM-DD.log，追加记录当天所有运行输出；
+    - 启动时自动轮转清理，连续留存最新 7 天的每日运行日志与状态流水；
     - StreamHandler(sys.stdout)：同步输出至终端控制台；
     - 适配 launchcontrol/launchd/cron 等定时后台任务无 TTY 环境。
     """
+    global LOG_PATH
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    LOG_PATH = get_today_log_path()
+
+    # 启动时执行 7 天日志留存清理
+    cleanup_logs(max_keep=7)
+
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     for h in list(root.handlers):
@@ -95,13 +170,22 @@ def init_logging():
 
     formatter = logging.Formatter('%(message)s')
 
-    file_handler = logging.FileHandler(LOG_PATH, mode='w', encoding='utf-8')
+    file_handler = logging.FileHandler(LOG_PATH, mode='a', encoding='utf-8')
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     root.addHandler(console_handler)
+
+    # 维护一个指向今日日志的快捷软链接 logs/aiyifan.log（便于快速查看而无需拼接日期）
+    try:
+        symlink_path = os.path.join(LOGS_DIR, "aiyifan.log")
+        if os.path.lexists(symlink_path):
+            os.remove(symlink_path)
+        os.symlink(os.path.basename(LOG_PATH), symlink_path)
+    except Exception:
+        pass
 
 
 # 模块导入级默认静默，待 main 入口被调用时通过 init_logging 挂载日志
@@ -1581,39 +1665,12 @@ def share_video(page):
 
 
 
-def cleanup_shared_logs(max_keep=30):
-    """限制 account_data/shared 目录下的状态日志文件数量，最多保留最新的 max_keep 份。"""
-    data_dir = 'account_data'
-    shared_dir = os.path.join(data_dir, 'shared')
-    if not os.path.exists(shared_dir):
-        return
-
-    try:
-        files = [
-            f for f in os.listdir(shared_dir)
-            if f.endswith('_status.txt') and os.path.isfile(os.path.join(shared_dir, f))
-        ]
-        files.sort()  # YYYY-MM-DD_status.txt 按字母升序即按日期先后排序
-        if len(files) > max_keep:
-            to_remove = files[:-max_keep]
-            for fname in to_remove:
-                fpath = os.path.join(shared_dir, fname)
-                try:
-                    os.remove(fpath)
-                except Exception as err:
-                    logging.warning(f"删除历史日志文件失败 {fpath}: {err}")
-    except Exception as e:
-        logging.warning(f"清理 shared 状态日志失败: {e}")
-
-
 def get_today_status_file_path(date_str=None):
-    """获取指定日期的状态日志文件路径"""
-    data_dir = 'account_data'
-    shared_dir = os.path.join(data_dir, 'shared')
-    os.makedirs(shared_dir, exist_ok=True)
+    """获取指定日期的状态日志文件路径（统一存放在根目录 logs/ 下）"""
+    os.makedirs(LOGS_DIR, exist_ok=True)
     if not date_str:
         date_str = datetime.now().strftime('%Y-%m-%d')
-    return os.path.join(shared_dir, f"{date_str}_status.txt")
+    return os.path.join(LOGS_DIR, f"{date_str}_status.txt")
 
 
 def init_today_status_file(accounts=None, ignored_accounts=None, date_str=None):
@@ -1660,7 +1717,7 @@ def init_today_status_file(accounts=None, ignored_accounts=None, date_str=None):
     with open(filename, 'w', encoding='utf-8') as f:
         f.writelines(lines)
 
-    cleanup_shared_logs(30)
+    cleanup_logs(7)
     return filename
 
 
@@ -1748,7 +1805,7 @@ def update_account_status(account_name, operation_type, success=True, time_str=N
     except Exception as e:
         print(f"⚠️ 写入状态文件失败: {e}")
 
-    cleanup_shared_logs(30)
+    cleanup_logs(7)
 
 
 def get_today_account_coins(account_name, date_str=None):
@@ -1782,7 +1839,7 @@ def natural_sort_key(s):
 def print_coins_summary_and_send_email(results=None, failed_accounts=None, date_str=None):
     """
     统一打印打卡表格汇总结果并根据规则触发邮件通知。
-    直接将 account_data/shared/<YYYY-MM-DD>_status.txt 的原格式内容作为邮件主体发送。
+    直接将 logs/<YYYY-MM-DD>_status.txt 的原格式内容作为邮件主体发送。
     状态符号标识：
       - ✅: 成功
       - ❌: 失败（操作异常/超时等）
@@ -1906,13 +1963,10 @@ def check_today_status(account_name, operation_type, date_str=None):
     Returns:
         bool: True 如果当天已成功完成该操作（需要跳过），否则 False
     """
-    data_dir = 'account_data'
-    shared_dir = os.path.join(data_dir, 'shared')
-    
     if not date_str:
         date_str = datetime.now().strftime('%Y-%m-%d')
     
-    status_file = os.path.join(shared_dir, f"{date_str}_status.txt")
+    status_file = get_today_status_file_path(date_str)
     if not os.path.exists(status_file):
         return False
 

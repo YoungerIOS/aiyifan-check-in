@@ -139,12 +139,14 @@ python main.py coins --visible
 
 ### 日志查看与历史状态
 
-* **邮件与系统运行日志**：
-  * 文件位置：[aiyifan.log]
-  * 记录内容：邮件发送记录、SMTP 报错、系统关键异常堆栈。
-* **每日详细操作流水**：
-  * 目录位置：[account_data/shared/]
-  * 每日自动生成 `YYYY-MM-DD_status.txt`，详细记录当天各账号何时成功执行了“签到”与“分享”（自动轮转清理，最多保留最近 30 份日志）。
+统一集中在根目录下的 `logs/` 目录中：
+
+* **每日系统运行日志**：
+  * 文件位置：`logs/aiyifan_YYYY-MM-DD.log`（同时提供软链接 `logs/aiyifan.log` 指向今日最新日志）
+  * 记录内容：执行命令、开始/结束耗时、邮件发送记录、SMTP 报错、系统关键异常堆栈（自动轮转清理，连续留存最新 7 份）。
+* **每日打卡操作流水**：
+  * 文件位置：`logs/YYYY-MM-DD_status.txt`
+  * 记录内容：每日自动生成状态表格，详细记录当天各账号何时成功执行了“签到”与“分享”以及最新金币余额（自动轮转清理，连续留存最新 7 份）。
 
 ---
 
@@ -167,4 +169,4 @@ python main.py help
 ## 故障排查
 
 - **提示「需要手动登录」**：爱壹帆服务端的 Session Token 通常有 1~3 个月的有效期，过期失效后只需执行 `python main.py login <账号名> auto` 快速刷新登录态；
-- **排查具体失败原因**：查看项目根目录下的 `aiyifan.log` 以及 `account_data/shared/` 当天的状态文件。
+- **排查具体失败原因**：查看 `logs/` 目录下的当日运行日志（`aiyifan_YYYY-MM-DD.log`）以及当天的状态流水（`YYYY-MM-DD_status.txt`）。
